@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ic_nfc_wave — wrapper que apunta al PNG del icono de la app.
+    PNG fuente: assets/icons/icon.png → res/drawable-xhdpi/ic_app_icon.png (96×96 px)
+
+    Todos los layouts usan @drawable/ic_nfc_wave; este fichero les redirige
+    al PNG sin tocar ninguna referencia existente.
+-->
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:src="@drawable/ic_app_icon"
+    android:gravity="center"/>
