@@ -32,6 +32,9 @@ class ResultActivity : AppCompatActivity() {
         private const val TAG = "ResultActivity"
     }
 
+    private var structData: RawStructureData? = null
+    private var isStructureMode: Boolean = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_result)
@@ -75,21 +78,38 @@ class ResultActivity : AppCompatActivity() {
 
         try {
             val gson = com.google.gson.Gson()
-            @Suppress("UNCHECKED_CAST")
-            val map = gson.fromJson(json, Map::class.java) as Map<String, Any?>
-            val raw = map["raw"] as? Map<*, *> ?: emptyMap<String, Any?>()
-            val dni = map["dni"] as? Map<*, *> ?: emptyMap<String, Any?>()
-            Log.d(TAG, "JSON parseado - rawKeys=${raw.keys}, dniKeys=${dni.keys}")
-            logBiometricReadContext(raw)
+            val struct = try {
+                gson.fromJson(json, RawStructureData::class.java).also {
+                    isStructureMode = true
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "JSON no es RawStructureData, intentando formato legacy: ${e.message}")
+                parseLegacyFormat(json, gson)
+            }
 
-            bindSummary(raw, dni)
-            bindWarning(dni)
-            val hasPhoto = bindPhoto(raw)
-            bindSignature(raw)
-            bindIdentity(dni)
-            bindDataGroups(raw)
-            bindDiagnostics(raw, dni)
-            bindSaveButton(btnSave, raw, hasPhoto)
+            if (struct == null) {
+                showFallbackError(json)
+                btnSave.isEnabled = false
+                return
+            }
+
+            structData = struct
+            bindSummary(struct)
+            bindWarning(struct)
+            val hasPhoto = bindPhoto(struct)
+            bindSignature(struct)
+            bindIdentity(struct)
+            bindDGTree(struct)
+            bindDiagnostics(struct)
+
+            if (isStructureMode) {
+                bindChipSecurity(struct)
+                bindHexDump(struct)
+            } else {
+                bindDataGroupsLegacy(struct)
+            }
+
+            bindSaveButton(btnSave, struct, hasPhoto)
         } catch (e: Exception) {
             Log.e(TAG, "Error procesando JSON de resultados: ${e.message}", e)
             showFallbackError(json)
@@ -97,51 +117,185 @@ class ResultActivity : AppCompatActivity() {
         }
     }
 
-    private fun bindSummary(raw: Map<*, *>, dni: Map<*, *>) {
-        val docType = dni["documentType"]?.toString().orDash()
-        val countryCode = dni["countryCode"]?.toString().orDash()
-        val countryName = dni["countryName"]?.toString().orEmpty()
-        val architecture = dni["architecture"]?.toString().orDash()
+    private fun parseLegacyFormat(json: String, gson: com.google.gson.Gson): RawStructureData? {
+        return try {
+            @Suppress("UNCHECKED_CAST")
+            val map = gson.fromJson(json, Map::class.java) as Map<String, Any?>
+            val raw = map["raw"] as? Map<*, *> ?: return null
+            val dni = map["dni"] as? Map<*, *> ?: emptyMap<String, Any?>()
+            val parser = NfcDataParser()
+
+            val dgMapData = raw["dgMap"] as? Map<*, *> ?: emptyMap<Int, Any?>()
+            val dgBytes = mutableMapOf<Int, ByteArray?>()
+            for ((k, v) in dgMapData) {
+                val dg = (k as? String)?.toIntOrNull() ?: (k as? Number)?.toInt() ?: continue
+                dgBytes[dg] = toByteArrayFromJsonValue(v)
+            }
+
+            val dgAnalysisData = raw["dgAnalysis"] as? Map<*, *> ?: emptyMap<Int, Any?>()
+            val dgAnalysis = mutableMapOf<Int, DataGroupInfo>()
+            for ((k, v) in dgAnalysisData) {
+                val dg = (k as? String)?.toIntOrNull() ?: (k as? Number)?.toInt() ?: continue
+                val m = v as? Map<*, *> ?: continue
+                dgAnalysis[dg] = DataGroupInfo(
+                    index = (m["index"] as? Number)?.toInt() ?: dg,
+                    status = try { DGStatus.valueOf(m["status"]?.toString() ?: "READ_ERROR") } catch (e: Exception) { DGStatus.READ_ERROR },
+                    sizeBytes = (m["sizeBytes"] as? Number)?.toInt(),
+                    sha256 = m["sha256"]?.toString(),
+                    exceptionType = m["exceptionType"]?.toString(),
+                    exceptionMessage = m["exceptionMessage"]?.toString()
+                )
+            }
+
+            val docType = DocumentDetection(
+                documentType = dni["documentType"]?.toString() ?: "UNKNOWN",
+                countryCode = dni["countryCode"]?.toString() ?: "UNK",
+                countryName = dni["countryName"]?.toString() ?: "Desconocido",
+                architecture = dni["architecture"]?.toString() ?: "UNKNOWN"
+            )
+
+            isStructureMode = false
+            RawStructureData(
+                uid = raw["uid"]?.toString(),
+                can = raw["can"]?.toString(),
+                sessionStatus = try { NfcSessionStatus.valueOf(raw["sessionStatus"]?.toString() ?: "SUCCESS") } catch (e: Exception) { NfcSessionStatus.SUCCESS },
+                sessionError = raw["sessionError"]?.toString(),
+                readerMethod = raw["readerMethod"]?.toString() ?: "LEGACY",
+                fallbackUsed = raw["fallbackUsed"] as? Boolean ?: false,
+                documentDetection = docType,
+                dgRawBytes = dgBytes,
+                dgAnalysis = dgAnalysis
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Error parseando legacy JSON: ${e.message}")
+            null
+        }
+    }
+
+    private fun bindSummary(struct: RawStructureData) {
+        val det = struct.documentDetection
+        val docType = det?.documentType.orDash()
+        val countryCode = det?.countryCode.orDash()
+        val countryName = det?.countryName.orEmpty()
+        val architecture = det?.architecture.orDash()
 
         findViewById<TextView>(R.id.tv_doc_title).text = listOf(
-            dni["nombre"]?.toString().nullIfBlank(),
-            dni["apellidos"]?.toString().nullIfBlank()
+            "Documento", docType
         ).joinToString(" ").ifBlank { getString(R.string.results_title) }
 
         findViewById<TextView>(R.id.tv_doc_subtitle).text =
-            "$docType · $countryCode ${countryName}".trim()
+            "$docType · $countryCode $countryName".trim()
 
-        setInfoText(R.id.tv_uid, R.string.label_uid, raw["uid"]?.toString())
-        setInfoText(R.id.tv_can, R.string.label_can, raw["can"]?.toString())
+        setInfoText(R.id.tv_uid, R.string.label_uid, struct.uid)
+        setInfoText(R.id.tv_can, R.string.label_can, maskCAN(struct.can))
     }
 
-    private fun bindIdentity(dni: Map<*, *>) {
-        setInfoText(R.id.tv_name, R.string.label_name, dni["nombre"]?.toString())
-        setInfoText(R.id.tv_surname, R.string.label_surname, dni["apellidos"]?.toString())
-        setInfoText(R.id.tv_doc_number, R.string.label_doc_number, dni["numeroDocumento"]?.toString())
-        setInfoText(R.id.tv_birth_date, R.string.label_birth_date, dni["fechaNacimiento"]?.toString())
-        setInfoText(R.id.tv_nationality, R.string.label_nationality, dni["nacionalidad"]?.toString())
-        setInfoText(R.id.tv_type, R.string.label_doc_type, dni["documentType"]?.toString())
-        setInfoText(
-            R.id.tv_country,
-            R.string.label_country,
-            listOf(dni["countryCode"]?.toString().nullIfBlank(), dni["countryName"]?.toString().nullIfBlank())
-                .joinToString(" ")
-                .ifBlank { null }
-        )
-        setInfoText(R.id.tv_architecture, R.string.label_architecture, dni["architecture"]?.toString())
-        setInfoText(R.id.tv_error_value, R.string.label_error, dni["error"]?.toString())
+    private fun bindIdentity(struct: RawStructureData) {
+        val det = struct.documentDetection
+
+        val dg1Bytes = struct.dgRawBytes?.get(1)
+        val dg11Bytes = struct.dgRawBytes?.get(11)
+        val dg13Bytes = struct.dgRawBytes?.get(13)
+
+        val dg1 = dg1Bytes?.let { runCatching { DG1_Dnie(it) }.getOrNull() }
+        val dg11 = dg11Bytes?.let { runCatching { DG11(it) }.getOrNull() }
+        val dg13 = dg13Bytes?.let { runCatching { DG13(it) }.getOrNull() }
+
+        Log.d(TAG, "bindIdentity: dg1=${dg1 != null}, dg11=${dg11 != null}, dg13=${dg13 != null}")
+
+        val nombre = dg13?.getName()?.takeIf { it.isNotBlank() }
+            ?: dg11?.getName()?.takeIf { it.isNotBlank() }
+            ?: dg1?.getName()?.takeIf { it.isNotBlank() }
+
+        val apellidos = if (dg13 != null) {
+            val s1 = dg13.getSurName1()?.takeIf { it.isNotBlank() }
+            val s2 = dg13.getSurName2()?.takeIf { it.isNotBlank() }
+            when {
+                s1 != null && s2 != null -> "$s1 $s2"
+                s1 != null -> s1
+                else -> dg1?.getSurname()?.takeIf { it.isNotBlank() }
+            }
+        } else {
+            dg1?.getSurname()?.takeIf { it.isNotBlank() }
+        }
+
+        val numeroDocumento = dg13?.getPersonalNumber()?.takeIf { it.isNotBlank() }
+            ?: dg1?.getDocNumber()?.takeIf { it.isNotBlank() }
+
+        val fechaNacimiento = (dg13?.getBirthDate()
+            ?: dg11?.getBirthDate()
+            ?: dg1?.getDateOfBirth())?.takeIf { it.isNotBlank() }
+
+        val nacionalidad = dg1?.getNationality()?.takeIf { it.isNotBlank() } ?: "ESP"
+        val tipoDocumento = dg1?.getDocType()?.takeIf { it.isNotBlank() } ?: det?.documentType
+
+        val genero = (dg13?.getSex() ?: dg1?.getSex())?.uppercase()?.let {
+            when (it) {
+                "F" -> "Femenino"
+                "M" -> "Masculino"
+                else -> null
+            }
+        }
+
+        val lugarNacimiento = if (dg13 != null) {
+            listOfNotNull(dg13.getBirthPopulation(), dg13.getBirthProvince())
+                .filter { it.isNotBlank() }
+                .joinToString(", ")
+                .takeIf { it.isNotBlank() }
+                ?: dg11?.getBirthPlace()?.takeIf { it.isNotBlank() }
+        } else {
+            dg11?.getBirthPlace()?.takeIf { it.isNotBlank() }
+        }
+
+        val domicilio = if (dg13 != null) {
+            listOfNotNull(
+                dg13.getActualAddress(),
+                dg13.getActualPopulation(),
+                dg13.getActualProvince()
+            ).filter { it.isNotBlank() }.joinToString(", ").takeIf { it.isNotBlank() }
+        } else if (dg11 != null) {
+            listOfNotNull(
+                dg11.getAddress(DG11.ADDR_DIRECCION),
+                dg11.getAddress(DG11.ADDR_LOCALIDAD),
+                dg11.getAddress(DG11.ADDR_PROVINCIA)
+            ).filter { it.isNotBlank() }.joinToString(", ").takeIf { it.isNotBlank() }
+        } else {
+            null
+        }
+
+        setInfoText(R.id.tv_name, R.string.label_name, nombre)
+        setInfoText(R.id.tv_surname, R.string.label_surname, apellidos)
+        setInfoText(R.id.tv_doc_number, R.string.label_doc_number, numeroDocumento)
+        setInfoText(R.id.tv_birth_date, R.string.label_birth_date, fechaNacimiento)
+        setInfoText(R.id.tv_nationality, R.string.label_nationality, nacionalidad)
+        setInfoText(R.id.tv_gender, R.string.label_gender, genero)
+        setInfoText(R.id.tv_birth_place, R.string.label_birth_place, lugarNacimiento)
+        setInfoText(R.id.tv_address, R.string.label_address, domicilio)
+        setInfoText(R.id.tv_father_name, R.string.label_father_name, dg13?.getFatherName()?.takeIf { it.isNotBlank() })
+        setInfoText(R.id.tv_mother_name, R.string.label_mother_name, dg13?.getMotherName()?.takeIf { it.isNotBlank() })
+        setInfoText(R.id.tv_support_number, R.string.label_support_number, dg1?.getDocNumber()?.takeIf { it.isNotBlank() })
+        setInfoText(R.id.tv_type, R.string.label_doc_type, tipoDocumento)
+        setInfoText(R.id.tv_country, R.string.label_country, listOf(det?.countryCode, det?.countryName).filterNotNull().joinToString(" ").ifBlank { null })
+        setInfoText(R.id.tv_architecture, R.string.label_architecture, det?.architecture)
+
+        val protocols = det?.supportedProtocols
+        if (!protocols.isNullOrEmpty()) {
+            setInfoText(R.id.tv_error_value, R.string.label_error, "Protocolos: ${protocols.joinToString(", ")}")
+        } else {
+            setInfoText(R.id.tv_error_value, R.string.label_error, null)
+        }
     }
 
-    private fun bindWarning(dni: Map<*, *>) {
+    private fun bindWarning(struct: RawStructureData) {
         val cardWarning = findViewById<View>(R.id.card_warning)
         val tvWarning = findViewById<TextView>(R.id.tv_warning)
 
         val warningText = when {
-            dni["fallbackUsed"] as? Boolean == true ->
-                "La lectura se completó con un método ICAO alternativo porque el método español no era compatible con este documento."
-            dni["documentType"]?.toString() == DocumentType.GERMAN_EID.name -> getString(R.string.german_eid_warning)
-            !dni["error"]?.toString().isNullOrBlank() -> dni["error"]?.toString()
+            struct.fallbackUsed ->
+                "La lectura se completó con un método alternativo porque el método español no era compatible con este documento."
+            struct.documentDetection?.documentType == DocumentType.GERMAN_EID.name ->
+                getString(R.string.german_eid_warning)
+            !struct.sessionError.isNullOrBlank() -> struct.sessionError
             else -> null
         }
 
@@ -153,40 +307,33 @@ class ResultActivity : AppCompatActivity() {
         }
     }
 
-    private fun bindPhoto(raw: Map<*, *>): Boolean {
+    private fun bindPhoto(struct: RawStructureData): Boolean {
         val ivPhoto = findViewById<ImageView>(R.id.iv_photo)
         val tvPhotoPlaceholder = findViewById<TextView>(R.id.tv_photo_placeholder)
         return try {
-            Log.d(TAG, "DG2 render - iniciando extracción de bytes")
-            val dg2Bytes = extractPhotoBytes(raw)
+            val dg2Bytes = extractPhotoBytes(struct)
             if (dg2Bytes != null) {
                 val result = ImageDecoder.decode(dg2Bytes)
-                Log.d(TAG, "DG2 render - bytes=${dg2Bytes.size}, head=${hexHead(dg2Bytes)}, formato=${result.format}, decoded=${result.success}")
+                Log.d(TAG, "DG2 render - bytes=${dg2Bytes.size}, formato=${result.format}, decoded=${result.success}")
 
                 if (result.bitmap != null) {
-                    Log.i(TAG, "Foto DG2 decodificada correctamente - ${result.bitmap.width}×${result.bitmap.height}, formato=${result.format}")
                     ivPhoto.setImageBitmap(result.bitmap)
                     ivPhoto.visibility = View.VISIBLE
                     tvPhotoPlaceholder.visibility = View.GONE
                     true
                 } else {
-                    // Decode falló — distinguir JP2 vs otros formatos
                     if (result.format == ImageFormat.JP2) {
-                        Log.w(TAG, "Formato no soportado para render: JP2 (OpenJPEG devolvió null)")
                         tvPhotoPlaceholder.text = getString(R.string.photo_jp2_decode_failed)
                     } else if (!result.format.isAndroidRenderable) {
-                        Log.w(TAG, "Formato no soportado para render: ${result.format.name}")
                         tvPhotoPlaceholder.text = getString(R.string.photo_format_not_renderable, result.format.name)
                     } else {
-                        Log.w(TAG, "DG2 render - decode devolvió null. bytes=${dg2Bytes.size}, head=${hexHead(dg2Bytes)}")
                         tvPhotoPlaceholder.text = getString(R.string.no_photo_available)
                     }
                     ivPhoto.visibility = View.GONE
                     tvPhotoPlaceholder.visibility = View.VISIBLE
-                    true // hay bytes → se puede guardar
+                    true
                 }
             } else {
-                Log.w(TAG, "DG2 render - no hay bytes para pintar imagen")
                 ivPhoto.visibility = View.GONE
                 tvPhotoPlaceholder.text = getString(R.string.no_photo_available)
                 tvPhotoPlaceholder.visibility = View.VISIBLE
@@ -201,31 +348,22 @@ class ResultActivity : AppCompatActivity() {
         }
     }
 
-    private fun bindSignature(raw: Map<*, *>): Boolean {
+    private fun bindSignature(struct: RawStructureData): Boolean {
         val ivSignature = findViewById<ImageView>(R.id.iv_signature)
         val tvSignaturePlaceholder = findViewById<TextView>(R.id.tv_signature_placeholder)
         return try {
-            Log.d(TAG, "DG7 render - iniciando extracción de bytes")
-            val dg7Bytes = extractSignatureBytes(raw)
+            val dg7Bytes = extractSignatureBytes(struct)
             if (dg7Bytes != null) {
                 val result = ImageDecoder.decode(dg7Bytes)
-                Log.d(TAG, "DG7 render - bytes=${dg7Bytes.size}, head=${hexHead(dg7Bytes)}, formato=${result.format}, decoded=${result.success}")
-
                 if (result.bitmap != null) {
-                    Log.i(TAG, "Firma DG7 decodificada correctamente - ${result.bitmap.width}×${result.bitmap.height}, formato=${result.format}")
                     ivSignature.setImageBitmap(result.bitmap)
                     ivSignature.visibility = View.VISIBLE
                     tvSignaturePlaceholder.visibility = View.GONE
                     true
                 } else {
-                    if (result.format == ImageFormat.JP2) {
-                        Log.w(TAG, "Formato no soportado para render: JP2 (OpenJPEG devolvió null)")
-                        tvSignaturePlaceholder.text = getString(R.string.signature_jp2_decode_failed)
-                    } else if (!result.format.isAndroidRenderable) {
-                        Log.w(TAG, "Formato no soportado para render: ${result.format.name}")
+                    if (!result.format.isAndroidRenderable) {
                         tvSignaturePlaceholder.text = getString(R.string.signature_format_not_renderable, result.format.name)
                     } else {
-                        Log.w(TAG, "DG7 render - decode devolvió null. bytes=${dg7Bytes.size}, head=${hexHead(dg7Bytes)}")
                         tvSignaturePlaceholder.text = getString(R.string.no_signature_available)
                     }
                     ivSignature.visibility = View.GONE
@@ -233,7 +371,6 @@ class ResultActivity : AppCompatActivity() {
                     false
                 }
             } else {
-                Log.w(TAG, "DG7 render - no hay bytes para pintar firma")
                 ivSignature.visibility = View.GONE
                 tvSignaturePlaceholder.text = getString(R.string.no_signature_available)
                 tvSignaturePlaceholder.visibility = View.VISIBLE
@@ -248,70 +385,171 @@ class ResultActivity : AppCompatActivity() {
         }
     }
 
-    private fun bindDataGroups(raw: Map<*, *>) {
+    private fun bindDGTree(struct: RawStructureData) {
         val container = findViewById<LinearLayout>(R.id.ll_dg_rows)
         container.removeAllViews()
 
-        val dgMap = raw["dgMap"] as? Map<*, *>
-        val dgAnalysisMap = raw["dgAnalysis"] as? Map<*, *>
-        val dgIndexes = collectDgIndexes(dgMap, dgAnalysisMap)
-        if (dgIndexes.isEmpty()) {
+        if (struct.dgRawBytes.isEmpty()) {
             container.addView(buildRow(getString(R.string.no_dg_data)))
             return
         }
 
-        dgIndexes.forEach { dg ->
-            val bytes = dgMap?.let { readDgBytes(it, dg) }
-            val analysis = parseDgAnalysisEntry(dgAnalysisMap, dg)
+        val allDgs = (struct.dgAnalysis.keys + struct.dgRawBytes.keys).sorted()
+        if (allDgs.isEmpty()) {
+            container.addView(buildRow(getString(R.string.no_dg_data)))
+            return
+        }
 
-            val status = analysis?.status ?: if (bytes != null) "READ_OK" else "UNKNOWN"
+        allDgs.forEach { dg ->
+            val bytes = struct.dgRawBytes[dg]
+            val analysis = struct.dgAnalysis[dg]
+            val tlvResult = struct.dgTLV[dg]
+
+            val status = analysis?.status?.name ?: if (bytes != null && bytes.isNotEmpty()) "READ_OK" else "UNKNOWN"
             val size = analysis?.sizeBytes ?: bytes?.size
             val hash = analysis?.sha256 ?: bytes?.let { sha256(it) }
-            container.addView(buildRow("DG$dg · $status · ${size?.let { "$it B" } ?: "-"} · SHA ${hash?.take(12) ?: "-"}…"))
+            val tlvNodes = tlvResult?.rootNodes?.size ?: analysis?.tlvNodes
+            val asn1Valid = tlvResult?.hasValidASN1 ?: analysis?.hasValidASN1
 
-            val errorText = listOfNotNull(analysis?.exceptionType, analysis?.exceptionMessage)
-                .joinToString(": ")
-                .nullIfBlank()
-            if (errorText != null) {
-                container.addView(buildRow("DG$dg · Error lectura: $errorText"))
+            val summary = buildString {
+                append("DG$dg · $status")
+                if (size != null) append(" · $size B")
+                if (hash != null) append(" · SHA ${hash.take(12)}…")
+                if (tlvNodes != null && tlvNodes > 0) {
+                    append(" · ${tlvNodes} tag(s) ASN.1")
+                } else if (asn1Valid == false) {
+                    append(" · ASN.1 inválido")
+                }
+            }
+            container.addView(buildRow(summary))
+
+            if (tlvResult != null && tlvResult.rootNodes.isNotEmpty()) {
+                for (node in tlvResult.rootNodes) {
+                    buildTLVTree(container, node, 1)
+                }
             }
 
-            if (bytes != null) {
-                container.addView(buildRow("DG$dg · HEX: ${toHexPreview(bytes)}"))
+            val errorText = listOfNotNull(analysis?.exceptionType, analysis?.exceptionMessage)
+                .joinToString(": ").nullIfBlank()
+            if (errorText != null) {
+                container.addView(buildRow("  Error: $errorText"))
+            }
 
-                val asciiPreview = toAsciiPreview(bytes)
-                if (asciiPreview != null) {
-                    container.addView(buildRow("DG$dg · ASCII: $asciiPreview"))
+            if (isStructureMode && bytes != null && bytes.isNotEmpty()) {
+                val hex = toHexPreview(bytes)
+                container.addView(buildRow("  HEX: $hex"))
+
+                val ascii = toAsciiPreview(bytes)
+                if (ascii != null) {
+                    container.addView(buildRow("  ASCII: $ascii"))
                 }
 
-                val decoded = decodeFieldsByDg(dg, bytes)
-                if (decoded.isNotEmpty()) {
-                    decoded.forEach { container.addView(buildRow(it)) }
-                } else {
-                    container.addView(buildRow("DG$dg · Sin parser específico en la app (solo bruto)."))
-                }
+                bindParsedDGFields(container, dg, bytes)
             }
         }
     }
 
-    private fun bindDiagnostics(raw: Map<*, *>, dni: Map<*, *>) {
+    private fun bindParsedDGFields(container: LinearLayout, dgIndex: Int, bytes: ByteArray) {
+        val dgObject: Any? = when (dgIndex) {
+            1 -> runCatching { DG1_Dnie(bytes) }.getOrNull()
+            2 -> runCatching { DG2(bytes) }.getOrNull()
+            7 -> runCatching { DG7(bytes) }.getOrNull()
+            11 -> runCatching { DG11(bytes) }.getOrNull()
+            13 -> runCatching { DG13(bytes) }.getOrNull()
+            else -> null
+        }
+
+        if (dgObject == null) return
+
+        val className = dgObject.javaClass.simpleName
+        container.addView(buildRow("  ── $className (campos parseados) ──"))
+
+        val methods = dgObject.javaClass.methods
+            .filter { it.name.startsWith("get") && it.parameterCount == 0 }
+            .sortedBy { it.name }
+            .filter { it.name !in listOf("getClass", "getBytes") }
+
+        for (method in methods) {
+            val label = method.name.removePrefix("get")
+                .replaceFirstChar { it.lowercase() }
+            try {
+                val result = method.invoke(dgObject) ?: continue
+                val displayValue = when (result) {
+                    is ByteArray -> {
+                        if (result.size > 200) {
+                            "[${result.size} bytes]"
+                        } else {
+                            val preview = result.joinToString("") { "%02X".format(it) }.take(120)
+                            if (result.size > 60) "$preview… [${result.size}B]" else preview
+                        }
+                    }
+                    is String -> result.takeIf { it.isNotBlank() } ?: continue
+                    is Int, is Long, is Boolean -> result.toString()
+                    else -> result.toString().takeIf { it.isNotBlank() && it != "null" } ?: continue
+                }
+                container.addView(buildRow("    $label = $displayValue"))
+            } catch (e: Exception) {
+                val msg = e.cause?.message ?: e.message
+                if (msg != null) {
+                    container.addView(buildRow("    $label = [error: ${msg.take(80)}]"))
+                }
+            }
+        }
+
+        val getBytesMethod = methods.firstOrNull { it.name == "getBytes" }
+        if (getBytesMethod != null) {
+            try {
+                val raw = getBytesMethod.invoke(dgObject) as? ByteArray
+                if (raw != null) {
+                    container.addView(buildRow("    rawBytes = [${raw.size} bytes]"))
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun buildTLVTree(container: LinearLayout, node: TLVNode, depth: Int) {
+        val indent = "  ".repeat(depth)
+        val constructed = if (node.isConstructed) "[+]" else ""
+        val sb = StringBuilder()
+
+        sb.append("$indent${node.tagHex} $constructed ${node.tagName}")
+        if (!node.isConstructed && node.length > 0) sb.append(" (${node.length}B)")
+
+        if (node.valueDecoded != null && !node.isConstructed) {
+            sb.append(" = \"${node.valueDecoded}\"")
+        } else if (node.valueAscii != null && !node.isConstructed && node.valueHex == null) {
+            val short = node.valueAscii.take(60)
+            sb.append(" = \"$short\"")
+            if (node.valueAscii.length > 60) sb.append("…")
+        } else if (node.valueHex != null && !node.isConstructed) {
+            sb.append(" = ${node.valueHex}")
+        }
+
+        container.addView(buildRow(sb.toString()))
+
+        for (child in node.children) {
+            buildTLVTree(container, child, depth + 1)
+        }
+    }
+
+    private fun bindDiagnostics(struct: RawStructureData) {
         val container = findViewById<LinearLayout>(R.id.ll_diag_rows)
         container.removeAllViews()
 
-        val dgMap = raw["dgMap"] as? Map<*, *>
-        val dgAnalysisMap = raw["dgAnalysis"] as? Map<*, *>
-        if (dgMap == null) {
+        if (struct.dgRawBytes.isEmpty() && struct.dgAnalysis.isEmpty()) {
             container.addView(buildRow(getString(R.string.no_dg_data)))
             return
         }
 
-        val documentType = dni["documentType"]?.toString()
-        val countryCode = dni["countryCode"]?.toString()
-        val architecture = dni["architecture"]?.toString()
+        val det = struct.documentDetection
+        val readDgs = struct.dgAnalysis.filter {
+            it.value.status == DGStatus.READ_OK
+        }.keys
 
-        val readDgs = (1..16).filter { i -> (dgMap[i.toString()] ?: dgMap[i]) != null }.toSet()
-        val expected = DocumentDiagnostics.expectedDataGroups(documentType, countryCode, architecture)
-        val statusByDg = parseStatusByDg(dgAnalysisMap)
+        val expected = DocumentDiagnostics.expectedDataGroups(
+            det?.documentType, det?.countryCode, det?.architecture
+        )
+        val statusByDg = struct.dgAnalysis.mapValues { it.value.status.name }
         val comparison = DocumentDiagnostics.compare(expected, readDgs, statusByDg)
 
         if (comparison.isEmpty()) {
@@ -319,58 +557,126 @@ class ResultActivity : AppCompatActivity() {
             return
         }
 
+        container.addView(buildRow("Esperados: ${expected.toList().sorted().joinToString(", ")} (${expected.size})"))
+        container.addView(buildRow("Leídos: ${readDgs.toList().sorted().joinToString(", ")} (${readDgs.size})"))
+
         comparison.forEach { item ->
             val text = "DG${item.dg} · esperado ${if (item.expected) "sí" else "no"} · leído ${if (item.read) "sí" else "no"} · ${item.status}"
             container.addView(buildRow(text))
         }
     }
 
-    private fun bindSaveButton(btnSave: Button, raw: Map<*, *>, hasPhoto: Boolean) {
+    private fun bindChipSecurity(struct: RawStructureData) {
+        val containerDg = findViewById<LinearLayout>(R.id.ll_dg_rows)
+        val ca = struct.efCardAccess
+        val cs = struct.efCardSecurity
+        val sod = struct.efSod
+        val com = struct.efCom
+
+        val securityInfo = mutableListOf<String>()
+
+        if (ca?.paceSupported == true) {
+            securityInfo.add("PACE: ${ca.paceAlgorithm.joinToString(", ")}")
+        }
+        if (ca?.chipAuthenticationSupported == true) {
+            securityInfo.add("ChipAuthentication (CA): soportado")
+        }
+        if (ca?.terminalAuthenticationSupported == true || cs?.terminalAuthenticationRequired == true) {
+            securityInfo.add("TerminalAuthentication (TA): ${cs?.terminalAuthenticationRequired?.let { "requerido" } ?: "soportado"}")
+        }
+        if (sod != null) {
+            securityInfo.add("SOD: ${sod.rawHash?.take(12) ?: "leído"}…")
+        }
+        if (com != null) {
+            securityInfo.add("EF.COM: LDS ${com.ldsVersion ?: "?"}, DGs: ${com.dataGroupsPresent}")
+        }
+        if (cs?.chipAuthenticationPublicKeySize != null) {
+            securityInfo.add("CA Public Key: ${cs.chipAuthenticationPublicKeySize} bytes")
+        }
+
+        if (securityInfo.isNotEmpty()) {
+            containerDg.addView(buildRow("── Chip Security ──"))
+            securityInfo.forEach { containerDg.addView(buildRow(it)) }
+        }
+    }
+
+    private fun bindHexDump(struct: RawStructureData) {
+        if (struct.dgRawBytes.isEmpty()) return
+        val container = findViewById<LinearLayout>(R.id.ll_diag_rows)
+        val allDgs = struct.dgRawBytes.keys.sorted()
+
+        var hasData = false
+        for (dg in allDgs) {
+            val bytes = struct.dgRawBytes[dg] ?: continue
+            if (bytes.isEmpty()) continue
+            if (!hasData) {
+                container.addView(buildRow("── Raw Hex Dump ──"))
+                hasData = true
+            }
+            container.addView(buildRow("DG$dg (${bytes.size}B): ${toHexPreview(bytes, 32)}"))
+        }
+    }
+
+    private fun bindDataGroupsLegacy(struct: RawStructureData) {
+        val container = findViewById<LinearLayout>(R.id.ll_dg_rows)
+        container.addView(buildRow("── Campos específicos por DG ──"))
+
+        val allDgs = struct.dgRawBytes.keys.sorted()
+        allDgs.forEach { dg ->
+            val bytes = struct.dgRawBytes[dg] ?: return@forEach
+            if (bytes.isEmpty()) return@forEach
+
+            when (dg) {
+                1 -> runCatching { DG1_Dnie(bytes) }.onSuccess { dg1 ->
+                    container.addView(buildRow("DG1 · ${dg1.getDocType()} / ${dg1.getIssuer()} · ${dg1.getDocNumber()}"))
+                    val name = listOfNotNull(dg1.getName(), dg1.getSurname()).joinToString(" ")
+                    if (name.isNotBlank()) container.addView(buildRow("DG1 · $name"))
+                }
+                11 -> runCatching { DG11(bytes) }.onSuccess { dg11 ->
+                    container.addView(buildRow("DG11 · ${dg11.getBirthPlace() ?: "-"} · ${dg11.getPersonalNumber() ?: "-"}"))
+                }
+                13 -> runCatching { DG13(bytes) }.onSuccess { dg13 ->
+                    val n = listOfNotNull(dg13.getName(), dg13.getSurName1(), dg13.getSurName2()).joinToString(" ")
+                    if (n.isNotBlank()) container.addView(buildRow("DG13 · $n"))
+                }
+            }
+        }
+    }
+
+    private fun bindSaveButton(btnSave: Button, struct: RawStructureData, hasPhoto: Boolean) {
         btnSave.isEnabled = hasPhoto
         btnSave.alpha = if (hasPhoto) 1f else 0.5f
         btnSave.setOnClickListener {
-            val bytes = extractPhotoBytes(raw)
+            val bytes = extractPhotoBytes(struct)
             if (bytes == null) {
                 Toast.makeText(this, getString(R.string.error_saving), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-
-            // Detección de formato por cabecera → extensión y MIME correctos
             val format = ImageFormatDetector.detect(bytes)
-            val mimeType = format.mimeType
-            val extension = format.extension
-            val displayName = "dni_photo_${System.currentTimeMillis()}.$extension"
-            Log.i(TAG, "Guardando imagen DG2 en galería como $displayName (${bytes.size} bytes, formato=$format, MIME=$mimeType)")
+            val displayName = "dni_photo_${System.currentTimeMillis()}.${format.extension}"
+            Log.i(TAG, "Guardando imagen como $displayName (${bytes.size} B, $format)")
 
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val values = ContentValues().apply {
                         put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
-                        put(MediaStore.Images.Media.MIME_TYPE, mimeType)
+                        put(MediaStore.Images.Media.MIME_TYPE, format.mimeType)
                         put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/DetectorNFC")
                     }
                     val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                     if (uri != null) {
                         contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
-                        Log.i(TAG, "Imagen guardada correctamente en galería (Android Q+)")
                         Toast.makeText(this, getString(R.string.saved_to_gallery), Toast.LENGTH_SHORT).show()
-                    } else {
-                        Log.w(TAG, "No se obtuvo URI de MediaStore para guardar la imagen")
-                        Toast.makeText(this, getString(R.string.error_saving), Toast.LENGTH_SHORT).show()
                     }
                 } else {
                     val values = ContentValues().apply {
                         put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
-                        put(MediaStore.Images.Media.MIME_TYPE, mimeType)
+                        put(MediaStore.Images.Media.MIME_TYPE, format.mimeType)
                     }
                     val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                     if (uri != null) {
                         contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
-                        Log.i(TAG, "Imagen guardada correctamente en galería (Android < Q)")
                         Toast.makeText(this, getString(R.string.saved_to_gallery), Toast.LENGTH_SHORT).show()
-                    } else {
-                        Log.w(TAG, "No se obtuvo URI de MediaStore para guardar la imagen en Android < Q")
-                        Toast.makeText(this, getString(R.string.error_saving), Toast.LENGTH_SHORT).show()
                     }
                 }
             } catch (ex: Exception) {
@@ -406,22 +712,40 @@ class ResultActivity : AppCompatActivity() {
         }
     }
 
+    private fun extractPhotoBytes(struct: RawStructureData): ByteArray? {
+        val dg2Raw = struct.dgRawBytes[2] ?: return null
+        if (dg2Raw.isEmpty()) return null
+        return try {
+            DG2(dg2Raw).getImageBytes()
+        } catch (e: Exception) {
+            Log.w(TAG, "DG2 extract fallback: ${e.message}")
+            dg2Raw
+        }
+    }
+
+    private fun extractSignatureBytes(struct: RawStructureData): ByteArray? {
+        val dg7Raw = struct.dgRawBytes[7] ?: return null
+        if (dg7Raw.isEmpty()) return null
+        return try {
+            DG7(dg7Raw).getImageBytes()
+        } catch (e: Exception) {
+            Log.w(TAG, "DG7 extract fallback: ${e.message}")
+            dg7Raw
+        }
+    }
+
     private fun setInfoText(viewId: Int, labelRes: Int, value: String?) {
         val label = getString(labelRes)
         val displayValue = value.orDash()
         val full = "$label  $displayValue"
         val spannable = SpannableString(full)
-        // Label: gris (#8E8E93), mismo tamaño
         spannable.setSpan(
             ForegroundColorSpan(getColor(R.color.text_secondary)),
-            0, label.length,
-            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            0, label.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
         )
-        // Valor: negro/oscuro
         spannable.setSpan(
             ForegroundColorSpan(getColor(R.color.text_primary)),
-            label.length, full.length,
-            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            label.length, full.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
         )
         findViewById<TextView>(viewId).text = spannable
     }
@@ -429,8 +753,7 @@ class ResultActivity : AppCompatActivity() {
     private fun buildRow(text: String): TextView {
         return TextView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).also { it.bottomMargin = dp(4) }
             background = androidx.appcompat.content.res.AppCompatResources
                 .getDrawable(this@ResultActivity, R.drawable.bg_info_row)
@@ -441,11 +764,25 @@ class ResultActivity : AppCompatActivity() {
         }
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun toHexPreview(bytes: ByteArray, max: Int = 24): String {
+        val count = minOf(bytes.size, max)
+        val preview = bytes.take(count).joinToString(" ") { "%02X".format(it) }
+        return if (bytes.size > max) "$preview …" else preview
+    }
+
+    private fun toAsciiPreview(bytes: ByteArray, max: Int = 140): String? {
+        val sb = StringBuilder()
+        val count = minOf(bytes.size, max)
+        for (i in 0 until count) {
+            val c = bytes[i].toInt() and 0xFF
+            sb.append(if (c in 32..126) c.toChar() else '.')
+        }
+        val compact = sb.toString().replace(Regex("\\.+"), ".").trim('.')
+        return compact.nullIfBlank()?.takeIf { it.any { ch -> ch.isLetterOrDigit() } }
+    }
 
     private fun sha256(bytes: ByteArray): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        val hashBytes = md.digest(bytes)
+        val hashBytes = MessageDigest.getInstance("SHA-256").digest(bytes)
         return hashBytes.joinToString("") { "%02x".format(it) }
     }
 
@@ -464,201 +801,14 @@ class ResultActivity : AppCompatActivity() {
         }
     }
 
-    private fun parseStatusByDg(dgAnalysisMap: Map<*, *>?): Map<Int, String> {
-        if (dgAnalysisMap == null) return emptyMap()
-        val result = mutableMapOf<Int, String>()
-        for ((k, v) in dgAnalysisMap) {
-            val dg = (k as? String)?.toIntOrNull() ?: (k as? Number)?.toInt() ?: continue
-            val status = when (v) {
-                is Map<*, *> -> v["status"]?.toString()
-                else -> null
-            }
-            if (!status.isNullOrBlank()) {
-                result[dg] = status
-            }
-        }
-        return result
+    private fun maskCAN(can: String?): String? {
+        if (can == null) return null
+        if (can.length <= 2) return "*".repeat(can.length)
+        return "${can.take(1)}${"*".repeat(can.length - 2)}${can.takeLast(1)}"
     }
 
-    private fun collectDgIndexes(dgMap: Map<*, *>?, dgAnalysisMap: Map<*, *>?): List<Int> {
-        val indexes = mutableSetOf<Int>()
-        dgMap?.keys?.forEach { key -> keyToDgIndex(key)?.let { indexes.add(it) } }
-        dgAnalysisMap?.keys?.forEach { key -> keyToDgIndex(key)?.let { indexes.add(it) } }
-        return indexes.sorted()
-    }
-
-    private fun keyToDgIndex(key: Any?): Int? {
-        return when (key) {
-            is String -> key.toIntOrNull()
-            is Number -> key.toInt()
-            else -> null
-        }
-    }
-
-    private fun parseDgAnalysisEntry(dgAnalysisMap: Map<*, *>?, dg: Int): DgAnalysisEntry? {
-        if (dgAnalysisMap == null) return null
-        val value = dgAnalysisMap[dg] ?: dgAnalysisMap[dg.toString()] ?: return null
-        val map = value as? Map<*, *> ?: return null
-
-        return DgAnalysisEntry(
-            status = map["status"]?.toString(),
-            sizeBytes = (map["sizeBytes"] as? Number)?.toInt(),
-            sha256 = map["sha256"]?.toString(),
-            exceptionType = map["exceptionType"]?.toString(),
-            exceptionMessage = map["exceptionMessage"]?.toString()
-        )
-    }
-
-    private fun decodeFieldsByDg(dg: Int, bytes: ByteArray): List<String> {
-        val rows = mutableListOf<String>()
-        when (dg) {
-            1 -> runCatching { DG1_Dnie(bytes) }.onSuccess { dg1 ->
-                addDgField(rows, 1, "Tipo documento", dg1.getDocType())
-                addDgField(rows, 1, "Emisor", dg1.getIssuer())
-                addDgField(rows, 1, "Numero documento", dg1.getDocNumber())
-                addDgField(rows, 1, "Nombre", dg1.getName())
-                addDgField(rows, 1, "Apellidos", dg1.getSurname())
-                addDgField(rows, 1, "Sexo", dg1.getSex())
-                addDgField(rows, 1, "Nacionalidad", dg1.getNationality())
-                addDgField(rows, 1, "Nacimiento", dg1.getDateOfBirth())
-                addDgField(rows, 1, "Caducidad", dg1.getDateOfExpiry())
-                addDgField(rows, 1, "Dato opcional", dg1.getOptData())
-            }
-
-            11 -> runCatching { DG11(bytes) }.onSuccess { dg11 ->
-                addDgField(rows, 11, "Nombre", dg11.getName())
-                addDgField(rows, 11, "Nombre ICAO", dg11.getIcaoName())
-                addDgField(rows, 11, "Titulo", dg11.getTitle())
-                addDgField(rows, 11, "Numero personal", dg11.getPersonalNumber())
-                addDgField(rows, 11, "Nacimiento", dg11.getBirthDate())
-                addDgField(rows, 11, "Lugar nacimiento", dg11.getBirthPlace())
-                addDgField(rows, 11, "Direccion", dg11.getAddress(DG11.ADDR_DIRECCION))
-                addDgField(rows, 11, "Localidad", dg11.getAddress(DG11.ADDR_LOCALIDAD))
-                addDgField(rows, 11, "Provincia", dg11.getAddress(DG11.ADDR_PROVINCIA))
-                addDgField(rows, 11, "Telefono", dg11.getPhone())
-                addDgField(rows, 11, "Profesion", dg11.getProfession())
-                addDgField(rows, 11, "Custodia", dg11.getCustodyInfo())
-                addDgField(rows, 11, "Otros", dg11.getOtherInfo())
-            }
-
-            13 -> runCatching { DG13(bytes) }.onSuccess { dg13 ->
-                addDgField(rows, 13, "Numero personal", dg13.getPersonalNumber())
-                addDgField(rows, 13, "Nombre", dg13.getName())
-                addDgField(rows, 13, "Apellido 1", dg13.getSurName1())
-                addDgField(rows, 13, "Apellido 2", dg13.getSurName2())
-                addDgField(rows, 13, "Sexo", dg13.getSex())
-                addDgField(rows, 13, "Nacimiento", dg13.getBirthDate())
-                addDgField(rows, 13, "Poblacion nacimiento", dg13.getBirthPopulation())
-                addDgField(rows, 13, "Provincia nacimiento", dg13.getBirthProvince())
-                addDgField(rows, 13, "Direccion actual", dg13.getActualAddress())
-                addDgField(rows, 13, "Poblacion actual", dg13.getActualPopulation())
-                addDgField(rows, 13, "Provincia actual", dg13.getActualProvince())
-                addDgField(rows, 13, "Caducidad", dg13.getExpirationDate())
-                addDgField(rows, 13, "Nombre padre", dg13.getFatherName())
-                addDgField(rows, 13, "Nombre madre", dg13.getMotherName())
-            }
-
-            2 -> runCatching { DG2(bytes).getImageBytes() }.onSuccess { img ->
-                rows.add("DG2 · Imagen biometrica: ${img.size} B")
-            }
-
-            7 -> runCatching { DG7(bytes).getImageBytes() }.onSuccess { img ->
-                rows.add("DG7 · Firma manuscrita: ${img.size} B")
-            }
-        }
-        return rows
-    }
-
-    private fun toHexPreview(bytes: ByteArray, maxBytes: Int = 24): String {
-        val count = minOf(bytes.size, maxBytes)
-        val preview = bytes.take(count).joinToString(" ") { "%02X".format(it) }
-        return if (bytes.size > maxBytes) "$preview ..." else preview
-    }
-
-    private fun toAsciiPreview(bytes: ByteArray, maxChars: Int = 140): String? {
-        if (bytes.isEmpty()) return null
-        val raw = buildString {
-            val count = minOf(bytes.size, maxChars)
-            for (i in 0 until count) {
-                val c = bytes[i].toInt() and 0xFF
-                append(if (c in 32..126) c.toChar() else '.')
-            }
-        }
-        val compact = raw.replace(Regex("\\.+"), ".").trim('.')
-        return compact.nullIfBlank()?.takeIf { it.any { ch -> ch.isLetterOrDigit() } }
-    }
-
-    private data class DgAnalysisEntry(
-        val status: String?,
-        val sizeBytes: Int?,
-        val sha256: String?,
-        val exceptionType: String?,
-        val exceptionMessage: String?
-    )
-
-    private fun addDgField(rows: MutableList<String>, dg: Int, label: String, value: String?) {
-        val normalized = value.nullIfBlank() ?: return
-        rows.add("DG$dg · $label: $normalized")
-    }
-
-    private fun readDgBytes(dgMap: Map<*, *>, dg: Int): ByteArray? {
-        val value = dgMap[dg] ?: dgMap[dg.toString()]
-        return toByteArrayFromJsonValue(value)
-    }
-
-    private fun extractPhotoBytes(raw: Map<*, *>): ByteArray? {
-        val dgMap = raw["dgMap"] as? Map<*, *> ?: return null
-        val dg2Raw = readDgBytes(dgMap, 2) ?: return null
-        Log.d(TAG, "DG2 extract - bytes crudos=${dg2Raw.size}, head=${hexHead(dg2Raw)}")
-        return runCatching {
-            val image = DG2(dg2Raw).getImageBytes()
-            Log.d(TAG, "DG2 extract - getImageBytes OK. bytes imagen=${image.size}, head=${hexHead(image)}")
-            image
-        }.getOrElse {
-            Log.w(TAG, "DG2 extract - fallo getImageBytes (${it.javaClass.simpleName}: ${it.message}). Se usa fallback crudo.")
-            dg2Raw
-        }
-    }
-
-    private fun extractSignatureBytes(raw: Map<*, *>): ByteArray? {
-        val dgMap = raw["dgMap"] as? Map<*, *> ?: return null
-        val dg7Raw = readDgBytes(dgMap, 7) ?: return null
-        Log.d(TAG, "DG7 extract - bytes crudos=${dg7Raw.size}, head=${hexHead(dg7Raw)}")
-        return runCatching {
-            val image = DG7(dg7Raw).getImageBytes()
-            Log.d(TAG, "DG7 extract - getImageBytes OK. bytes imagen=${image.size}, head=${hexHead(image)}")
-            image
-        }.getOrElse {
-            Log.w(TAG, "DG7 extract - fallo getImageBytes (${it.javaClass.simpleName}: ${it.message}). Se usa fallback crudo.")
-            dg7Raw
-        }
-    }
-
-    private fun logBiometricReadContext(raw: Map<*, *>) {
-        val dgMap = raw["dgMap"] as? Map<*, *>
-        val dgAnalysis = raw["dgAnalysis"] as? Map<*, *>
-        Log.i(TAG, "Contexto biometrico - dgMapKeys=${dgMap?.keys ?: emptyList<Any>()}, dgAnalysisKeys=${dgAnalysis?.keys ?: emptyList<Any>()}")
-
-        listOf(2, 7).forEach { dg ->
-            val bytes = dgMap?.let { readDgBytes(it, dg) }
-            val analysis = parseDgAnalysisEntry(dgAnalysis, dg)
-            Log.i(
-                TAG,
-                "DG$dg contexto - rawBytes=${bytes?.size ?: 0}, status=${analysis?.status ?: "-"}, " +
-                    "sizeBytes=${analysis?.sizeBytes ?: -1}, exceptionType=${analysis?.exceptionType ?: "-"}, " +
-                    "exceptionMessage=${analysis?.exceptionMessage ?: "-"}"
-            )
-        }
-    }
-
-    private fun hexHead(bytes: ByteArray, size: Int = 12): String {
-        if (bytes.isEmpty()) return "<empty>"
-        val count = minOf(bytes.size, size)
-        val head = bytes.take(count).joinToString(" ") { "%02X".format(it) }
-        return if (bytes.size > size) "$head ..." else head
-    }
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun String?.orDash(): String = this.nullIfBlank() ?: "-"
-
     private fun String?.nullIfBlank(): String? = this?.takeIf { it.isNotBlank() }
 }

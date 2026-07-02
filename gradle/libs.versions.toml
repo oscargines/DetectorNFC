@@ -1,5 +1,5 @@
 [versions]
-agp             = "9.1.1"
+agp             = "9.2.1"
 # AGP 9.x incluye soporte Kotlin nativo (KGP 2.2.10 embebido).
 
 coreKtx           = "1.18.0"
@@ -12,7 +12,7 @@ activity          = "1.13.0"
 constraintlayout  = "2.2.1"
 lifecycleRuntime  = "2.8.0"
 gson              = "2.10.1"
-bouncycastle      = "1.50"
+bouncycastle      = "1.65"
 # jp2Android      = "1.0"   ← ver comentario en app/build.gradle.kts
 
 [libraries]
@@ -35,6 +35,8 @@ gson                       = { group = "com.google.code.gson", name = "gson", ve
 # --- BouncyCastle legacy (dniedroid-release.aar usa clases ASN.1 antiguas, p.ej. DERObjectIdentifier) ---
 bouncycastle-prov          = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }
 bouncycastle-pkix          = { group = "org.bouncycastle", name = "bcpkix-jdk15on", version.ref = "bouncycastle" }
+bouncycastle-mail          = { group = "org.bouncycastle", name = "bcmail-jdk15on", version.ref = "bouncycastle" }
+bouncycastle-tls           = { group = "org.bouncycastle", name = "bctls-jdk15on", version.ref = "bouncycastle" }
 
 # --- Test ---
 junit                      = { group = "junit",                  name = "junit",          version.ref = "junit" }

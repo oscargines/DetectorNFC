@@ -19,130 +19,199 @@ class IcaoReader(private val tag: Tag?) {
 
     private val tagName = "IcaoReader"
     private val accessMethodDetail = "PACE-CAN / ICAO JMRTD"
+    private val maxRetries = 2
 
     fun readWithCan(can: String): RawNfcData {
+        Log.i(tagName, "====== readWithCan() INICIO ======")
+        Log.i(tagName, "tag=${tag != null}, can.length=${can.length}, can.isBlank=${can.isBlank()}")
+
         if (tag == null) {
-            Log.e(tagName, "Tag NFC nulo para lectura ICAO")
+            Log.e(tagName, "FAIL: Tag NFC nulo para lectura ICAO")
             return failure(null, "No se detecto un tag NFC valido.")
         }
         if (can.isBlank()) {
-            Log.e(tagName, "CAN vacío: no se puede iniciar PACE ICAO")
+            Log.e(tagName, "FAIL: CAN vacío")
             return failure(formatUid(tag.id), "CAN vacío. No se puede iniciar la lectura ICAO con PACE.")
         }
 
         val uid = formatUid(tag.id)
-        val isoDep = IsoDep.get(tag)
-        if (isoDep == null) {
-            Log.e(tagName, "El tag no expone la tecnología IsoDep")
-            return failure(uid, "El documento no expone la tecnología NFC requerida para lectura ICAO.")
-        }
+        Log.i(tagName, "uid=$uid, techs=${tag.techList.joinToString()}")
 
-        val cardService = IsoDepCardService(isoDep)
-        val passportService = PassportService(
-            cardService,
-            PassportService.NORMAL_MAX_TRANCEIVE_LENGTH,
-            PassportService.DEFAULT_MAX_BLOCKSIZE,
-            false,
-            false
-        )
+        var lastError: Exception? = null
+        var attempt = 0
 
-        try {
-            isoDep.timeout = 10000
-            passportService.open()
-            passportService.sendSelectApplet(false)
+        while (attempt < maxRetries) {
+            attempt++
+            Log.i(tagName, "--- Intento ICAO $attempt/$maxRetries ---")
 
-            val cardAccess = readCardAccess(passportService)
-            val paceInfo = cardAccess?.securityInfos
-                ?.firstNotNullOfOrNull { it as? PACEInfo }
-                ?: return failure(uid, "El documento no ofrece PACE con CAN para el método ICAO.")
+            val isoDep = IsoDep.get(tag)
+            if (isoDep == null) {
+                Log.e(tagName, "FAIL: IsoDep.get(tag) devolvió null - techList=${tag.techList.joinToString()}")
+                if (attempt >= maxRetries) {
+                    return failure(uid, "El documento no expone la tecnología NFC requerida para lectura ICAO.")
+                }
+                Thread.sleep(300)
+                continue
+            }
+            Log.d(tagName, "IsoDep obtenido: isConnected=${isoDep.isConnected}")
 
-            val paceKey = PACEKeySpec.createCANKey(can)
-            passportService.doPACE(
-                paceKey,
-                paceInfo.objectIdentifier,
-                PACEInfo.toParameterSpec(paceInfo.parameterId),
-                paceInfo.parameterId
+            val cardService = IsoDepCardService(isoDep)
+            val passportService = PassportService(
+                cardService,
+                PassportService.NORMAL_MAX_TRANCEIVE_LENGTH,
+                PassportService.DEFAULT_MAX_BLOCKSIZE,
+                false,
+                false
             )
-            passportService.sendSelectApplet(true)
-            Log.i(tagName, "PACE ICAO completado correctamente")
 
-            val dgMap = mutableMapOf<Int, ByteArray?>()
-            val dgAnalysis = mutableMapOf<Int, DataGroupInfo>()
-            var fatalSessionError: String? = null
+            try {
+                isoDep.timeout = 15000
+                Log.d(tagName, "Abriendo passportService...")
+                passportService.open()
+                Log.d(tagName, "passportService.open() OK")
 
-            fatalSessionError = readDg(1, dgMap, dgAnalysis) {
-                readFileBytes(passportService, PassportService.EF_DG1)
-            }
-            if (fatalSessionError == null) {
-                fatalSessionError = readDg(11, dgMap, dgAnalysis) {
-                    readFileBytes(passportService, PassportService.EF_DG11)
-                }
-            }
-            if (fatalSessionError == null) {
-                fatalSessionError = readDg(2, dgMap, dgAnalysis) {
-                    val raw = readFileBytes(passportService, PassportService.EF_DG2)
-                    extractFaceImage(raw) ?: raw
-                }
-            }
-            if (fatalSessionError == null) {
-                fatalSessionError = readDg(7, dgMap, dgAnalysis) {
-                    val raw = readFileBytes(passportService, PassportService.EF_DG7)
-                    extractSignatureImage(raw) ?: raw
-                }
-            }
-            if (fatalSessionError == null) {
-                fatalSessionError = readDg(15, dgMap, dgAnalysis) {
-                    readFileBytes(passportService, PassportService.EF_DG15)
-                }
-            }
+                Log.d(tagName, "Enviando SELECT applet (false)...")
+                passportService.sendSelectApplet(false)
+                Log.d(tagName, "SELECT applet (false) OK")
 
-            if (fatalSessionError != null) {
-                for (pendingDg in listOf(1, 11, 2, 7, 15)) {
-                    if (!dgAnalysis.containsKey(pendingDg)) {
-                        dgAnalysis[pendingDg] = DataGroupInfo.skipped(pendingDg, fatalSessionError)
+                Log.d(tagName, "Leyendo EF.CardAccess...")
+                val cardAccess = readCardAccess(passportService)
+                Log.d(tagName, "EF.CardAccess: ${cardAccess != null}")
+
+                if (cardAccess == null) {
+                    Log.w(tagName, "EF.CardAccess es null")
+                    return failure(uid, "El documento no ofrece PACE con CAN para el método ICAO.")
+                }
+
+                val paceInfo = cardAccess.securityInfos
+                    .firstNotNullOfOrNull { it as? PACEInfo }
+                Log.d(tagName, "PACEInfo: ${paceInfo != null}, oid=${paceInfo?.objectIdentifier}, paramId=${paceInfo?.parameterId}")
+
+                if (paceInfo == null) {
+                    Log.w(tagName, "No se encontró PACEInfo. SecurityInfos: ${cardAccess.securityInfos.map { it.objectIdentifier }}")
+                    return failure(uid, "El documento no ofrece PACE con CAN para el método ICAO.")
+                }
+
+                Log.d(tagName, "Ejecutando doPACE...")
+                val paceKey = PACEKeySpec.createCANKey(can)
+                passportService.doPACE(
+                    paceKey,
+                    paceInfo.objectIdentifier,
+                    PACEInfo.toParameterSpec(paceInfo.parameterId),
+                    paceInfo.parameterId
+                )
+                Log.d(tagName, "doPACE() OK")
+
+                Log.d(tagName, "Enviando SELECT applet (true) post-PACE...")
+                passportService.sendSelectApplet(true)
+                Log.i(tagName, "PACE ICAO completado correctamente (intento $attempt/$maxRetries)")
+
+                val dgMap = mutableMapOf<Int, ByteArray?>()
+                val dgAnalysis = mutableMapOf<Int, DataGroupInfo>()
+                var fatalSessionError: String? = null
+
+                Log.d(tagName, "Leyendo DG1...")
+                fatalSessionError = readDg(1, dgMap, dgAnalysis) {
+                    readFileBytes(passportService, PassportService.EF_DG1)
+                }
+                if (fatalSessionError == null) {
+                    Log.d(tagName, "Leyendo DG11...")
+                    fatalSessionError = readDg(11, dgMap, dgAnalysis) {
+                        readFileBytes(passportService, PassportService.EF_DG11)
                     }
                 }
-            }
+                if (fatalSessionError == null) {
+                    Log.d(tagName, "Leyendo DG13...")
+                    fatalSessionError = readDg(13, dgMap, dgAnalysis) {
+                        readFileBytes(passportService, PassportService.EF_DG13)
+                    }
+                }
+                if (fatalSessionError == null) {
+                    Log.d(tagName, "Leyendo DG2...")
+                    fatalSessionError = readDg(2, dgMap, dgAnalysis) {
+                        val raw = readFileBytes(passportService, PassportService.EF_DG2)
+                        extractFaceImage(raw) ?: raw
+                    }
+                }
+                if (fatalSessionError == null) {
+                    Log.d(tagName, "Leyendo DG7...")
+                    fatalSessionError = readDg(7, dgMap, dgAnalysis) {
+                        val raw = readFileBytes(passportService, PassportService.EF_DG7)
+                        extractSignatureImage(raw) ?: raw
+                    }
+                }
+                if (fatalSessionError == null) {
+                    Log.d(tagName, "Leyendo DG15...")
+                    fatalSessionError = readDg(15, dgMap, dgAnalysis) {
+                        readFileBytes(passportService, PassportService.EF_DG15)
+                    }
+                }
 
-            val available = dgAnalysis.filter { it.value.status == DGStatus.READ_OK }.keys.sorted()
-            val sessionStatus = when {
-                fatalSessionError == null -> NfcSessionStatus.SUCCESS
-                available.isNotEmpty() -> NfcSessionStatus.PARTIAL
-                else -> NfcSessionStatus.FAILED
+                if (fatalSessionError != null) {
+                    Log.w(tagName, "Error fatal de sesión: $fatalSessionError")
+                    for (pendingDg in listOf(1, 11, 13, 2, 7, 15)) {
+                        if (!dgAnalysis.containsKey(pendingDg)) {
+                            dgAnalysis[pendingDg] = DataGroupInfo.skipped(pendingDg, fatalSessionError)
+                        }
+                    }
+                }
+
+                val available = dgAnalysis.filter { it.value.status == DGStatus.READ_OK }.keys.sorted()
+                Log.i(tagName, "DGs OK: $available, fatal=$fatalSessionError")
+
+                val sessionStatus = when {
+                    fatalSessionError == null -> NfcSessionStatus.SUCCESS
+                    available.isNotEmpty() -> NfcSessionStatus.PARTIAL
+                    else -> NfcSessionStatus.FAILED
+                }
+                val sessionError = when {
+                    fatalSessionError != null -> fatalSessionError
+                    sessionStatus == NfcSessionStatus.FAILED -> "No se pudo completar la lectura ICAO del documento."
+                    else -> null
+                }
+                Log.i(tagName, "Lectura ICAO completada. status=$sessionStatus, error=$sessionError")
+                Log.i(tagName, "====== readWithCan() FIN ======")
+
+                return RawNfcData(
+                    uid = uid,
+                    can = can,
+                    dataGroups = dgMap,
+                    sod = null,
+                    dgAnalysis = dgAnalysis,
+                    sessionStatus = sessionStatus,
+                    sessionError = sessionError,
+                    readerMethod = NfcReaderMethod.ICAO_JMRTD,
+                    accessMethodDetail = accessMethodDetail,
+                    fallbackUsed = true
+                )
+            } catch (e: Exception) {
+                lastError = e
+                Log.e(tagName, "EXCEPCIÓN en intento ICAO $attempt/$maxRetries: ${e.javaClass.simpleName}: ${e.message}", e)
+                runCatching { passportService.close() }
+                runCatching { cardService.close() }
+                runCatching { isoDep.close() }
+
+                if (attempt >= maxRetries || isFatalCommunicationError(e)) {
+                    val userMessage = when {
+                        isFatalCommunicationError(e) ->
+                            "Se perdió la conexión NFC durante la lectura ICAO. Mantén el documento inmóvil y reintenta."
+                        e is TagLostException || e is IOException || e is CardServiceException ->
+                            "No se pudo completar la comunicación con el documento mediante ICAO."
+                        else -> "No se pudo leer el documento con el método ICAO alternativo."
+                    }
+                    Log.e(tagName, "Error final en lectura ICAO (tras $attempt intentos): ${e.message}", e)
+                    return failure(uid, userMessage)
+                }
+                Thread.sleep(500)
             }
-            val sessionError = when {
-                fatalSessionError != null -> fatalSessionError
-                sessionStatus == NfcSessionStatus.FAILED -> "No se pudo completar la lectura ICAO del documento."
-                else -> null
-            }
-            Log.i(tagName, "Lectura ICAO completada. DGs OK=$available, status=$sessionStatus")
-            return RawNfcData(
-                uid = uid,
-                can = can,
-                dataGroups = dgMap,
-                sod = null,
-                dgAnalysis = dgAnalysis,
-                sessionStatus = sessionStatus,
-                sessionError = sessionError,
-                readerMethod = NfcReaderMethod.ICAO_JMRTD,
-                accessMethodDetail = accessMethodDetail,
-                fallbackUsed = true
-            )
-        } catch (e: Exception) {
-            Log.e(tagName, "Error en lectura ICAO: ${e.message}", e)
-            val userMessage = when {
-                isFatalCommunicationError(e) ->
-                    "Se perdió la conexión NFC durante la lectura ICAO. Mantén el documento inmóvil y reintenta."
-                e is TagLostException || e is IOException || e is CardServiceException ->
-                    "No se pudo completar la comunicación con el documento mediante ICAO."
-                else -> "No se pudo leer el documento con el método ICAO alternativo."
-            }
-            return failure(uid, userMessage)
-        } finally {
-            runCatching { passportService.close() }
-            runCatching { cardService.close() }
-            runCatching { isoDep.close() }
         }
+
+        val userMessage = when {
+            lastError is TagLostException || lastError is IOException || lastError is CardServiceException ->
+                "No se pudo completar la comunicación con el documento mediante ICAO."
+            else -> "No se pudo leer el documento con el método ICAO alternativo tras varios intentos."
+        }
+        return failure(uid, userMessage)
     }
 
     private fun readCardAccess(passportService: PassportService): CardAccessFile? {
@@ -157,20 +226,42 @@ class IcaoReader(private val tag: Tag?) {
     }
 
     private fun readFileBytes(passportService: PassportService, fid: Short): ByteArray {
-        return passportService.getInputStream(fid).use { it.readBytes() }
+        try {
+            return passportService.getInputStream(fid).use { it.readBytes() }
+        } catch (e: Exception) {
+            val msg = e.message?.lowercase() ?: ""
+            if (msg.contains("6a82") || msg.contains("6988") || msg.contains("6a86") ||
+                msg.contains("not found") || msg.contains("file not found") ||
+                msg.contains("no existe") || msg.contains("not supported")) {
+                return ByteArray(0)
+            }
+            throw e
+        }
     }
 
     private fun extractFaceImage(raw: ByteArray): ByteArray? {
-        val dg2 = DG2File(ByteArrayInputStream(raw))
-        val faceInfo = dg2.faceInfos.firstOrNull() ?: return null
-        val faceImage = faceInfo.faceImageInfos.firstOrNull() ?: return null
-        return faceImage.imageInputStream.use { it.readBytes() }
+        if (raw.size < 4) return null
+        return try {
+            val dg2 = DG2File(ByteArrayInputStream(raw))
+            val faceInfo = dg2.faceInfos.firstOrNull() ?: return null
+            val faceImage = faceInfo.faceImageInfos.firstOrNull() ?: return null
+            faceImage.imageInputStream.use { it.readBytes() }
+        } catch (e: Exception) {
+            Log.w(tagName, "Error extrayendo imagen facial ICAO: ${e.message}")
+            null
+        }
     }
 
     private fun extractSignatureImage(raw: ByteArray): ByteArray? {
-        val dg7 = DG7File(ByteArrayInputStream(raw))
-        val image = dg7.images.firstOrNull() ?: return null
-        return image.imageInputStream.use { it.readBytes() }
+        if (raw.size < 4) return null
+        return try {
+            val dg7 = DG7File(ByteArrayInputStream(raw))
+            val image = dg7.images.firstOrNull() ?: return null
+            return image.imageInputStream.use { it.readBytes() }
+        } catch (e: Exception) {
+            Log.w(tagName, "Error extrayendo firma ICAO: ${e.message}")
+            null
+        }
     }
 
     private fun readDg(

@@ -14,10 +14,78 @@ import java.io.ByteArrayInputStream
  *
  * - Método español: usa dniedroid/jmulticard (DG1_Dnie, DG11, DG13)
  * - Método ICAO alternativo: usa JMRTD (DG1File, DG11File, MRZInfo)
+ * - Soporte universal: TIE/NIE y documentos europeos
  */
 class NfcDataParser {
 
     private val TAG = "NfcDataParser"
+
+    fun analyzeStructure(rawData: RawStructureData): RawStructureData {
+        if (rawData.sessionStatus == NfcSessionStatus.FAILED) {
+            return rawData
+        }
+
+        val dgTLV = mutableMapOf<Int, DGTLVResult>()
+        for ((dg, bytes) in rawData.dgRawBytes) {
+            if (bytes != null && bytes.isNotEmpty()) {
+                val result = TLVStructureAnalyzer.analyze(bytes, dg)
+                dgTLV[dg] = result
+            }
+        }
+
+        val updatedAnalysis = rawData.dgAnalysis.toMutableMap()
+        for ((dg, tlvResult) in dgTLV) {
+            val existing = updatedAnalysis[dg]
+            if (existing != null) {
+                updatedAnalysis[dg] = existing.copy(
+                    tlvNodes = tlvResult.rootNodes.size,
+                    hasValidASN1 = tlvResult.hasValidASN1
+                )
+            }
+        }
+
+        return rawData.copy(
+            dgTLV = dgTLV,
+            dgAnalysis = updatedAnalysis
+        )
+    }
+
+    fun convertFromRawNfcData(rawData: RawNfcData, tlvAnalyzer: Boolean = false): RawStructureData {
+        val docType = detectFromDNIData(rawData)
+
+        val dgRawBytes = rawData.dataGroups.mapValues { (_, v) -> v }
+        val rawStructure = RawStructureData(
+            uid = rawData.uid,
+            can = rawData.can,
+            sessionStatus = rawData.sessionStatus,
+            sessionError = rawData.sessionError,
+            readerMethod = rawData.readerMethod.name,
+            fallbackUsed = rawData.fallbackUsed,
+            documentDetection = docType,
+            dgRawBytes = dgRawBytes,
+            dgAnalysis = rawData.dgAnalysis
+        )
+
+        return if (tlvAnalyzer) analyzeStructure(rawStructure) else rawStructure
+    }
+
+    private fun detectFromDNIData(rawData: RawNfcData): DocumentDetection? {
+        val dg1Bytes = rawData.dataGroups[1] ?: return null
+        return try {
+            val dg1 = safe { org.jmrtd.lds.icao.DG1File(ByteArrayInputStream(dg1Bytes)) }
+            val mrz = dg1?.mrzInfo ?: return null
+            val classifier = DocumentClassifier.classify(mrz.documentCode, mrz.issuingState)
+            DocumentDetection(
+                documentType = classifier.documentType.name,
+                countryCode = classifier.countryCode,
+                countryName = classifier.countryName,
+                architecture = classifier.architecture.name
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Error detectando documento desde RawNfcData: ${e.message}")
+            null
+        }
+    }
 
     fun parseRawData(rawData: RawNfcData): DniData {
         if (rawData.sessionStatus == NfcSessionStatus.FAILED) {
@@ -29,7 +97,156 @@ class NfcDataParser {
         return when (rawData.readerMethod) {
             NfcReaderMethod.ICAO_JMRTD -> parseIcaoRawData(rawData)
             NfcReaderMethod.SPANISH_DNIE -> parseSpanishRawData(rawData)
+            NfcReaderMethod.EUROPEAN_STRUCTURE -> parseEuropeanRawData(rawData)
         }
+    }
+
+    private fun parseEuropeanRawData(rawData: RawNfcData): DniData {
+        val dg1Bytes = rawData.dataGroups[1]
+        if (dg1Bytes == null) {
+            val errorMessage = rawData.sessionError ?: "No se pudo leer DG1."
+            return buildFailureData(rawData, errorMessage)
+        }
+
+        val dg1 = safe { DG1File(ByteArrayInputStream(dg1Bytes)) }
+        val mrz = dg1?.mrzInfo
+        if (mrz == null) {
+            val errorMessage = rawData.sessionError ?: "No se pudo interpretar el MRZ."
+            return buildFailureData(rawData, errorMessage)
+        }
+
+        val classifier = DocumentClassifier.classify(mrz.documentCode, mrz.issuingState)
+
+        return when {
+            classifier.isResidencePermit && classifier.countryCode == "ESP" ->
+                parseSpanishResidencePermit(rawData, mrz, classifier)
+            DocumentClassifier.isSpanishDni(classifier) && DniReader.areDependenciesAvailable() ->
+                parseSpanishRawData(rawData)
+            DocumentClassifier.isEuropeanIdCard(classifier) ->
+                parseEuropeanIdCard(rawData, mrz, classifier)
+            else ->
+                parseIcaoRawData(rawData)
+        }
+    }
+
+    private fun parseSpanishResidencePermit(rawData: RawNfcData, mrz: MRZInfo, classifier: ClassificationResult): DniData {
+        Log.i(TAG, "parseSpanishResidencePermit() - Parseando TIE/NIE")
+
+        val dg11 = rawData.dataGroups[11]?.let { safe { JmrtdDG11File(ByteArrayInputStream(it)) } }
+
+        val nombre = mrz.secondaryIdentifierComponents
+            ?.mapNotNull { normalizeMrzText(it) }
+            ?.filter { it.isNotBlank() }
+            ?.joinToString(" ")
+            ?.takeIf { it.isNotBlank() }
+
+        val apellidos = normalizeMrzText(mrz.primaryIdentifier)
+        val numeroDocumento = normalizeMrzText(mrz.documentNumber)
+        val nacionalidad = normalizeMrzText(mrz.nationality) ?: classifier.countryCode
+        val tipoDocumento = classifier.documentSubtype ?: "Tarjeta de Residencia"
+        val fechaNacimiento = formatDate(mrz.dateOfBirth)
+
+        val lugarNacimiento = dg11?.placeOfBirth
+            ?.mapNotNull { normalizeMrzText(it) }
+            ?.joinToString(", ")
+            ?.takeIf { it.isNotBlank() }
+
+        val domicilio = dg11?.permanentAddress
+            ?.mapNotNull { normalizeMrzText(it) }
+            ?.joinToString(", ")
+            ?.takeIf { it.isNotBlank() }
+
+        val errorMessage = when {
+            rawData.sessionStatus == NfcSessionStatus.PARTIAL && !rawData.sessionError.isNullOrBlank() -> rawData.sessionError
+            nombre == null && apellidos == null && numeroDocumento == null -> "No se pudieron extraer datos clave del TIE/NIE"
+            else -> null
+        }
+
+        Log.i(TAG, "parseSpanishResidencePermit() OK — nombre=${nombre != null}, apellidos=${apellidos != null}, nie=${numeroDocumento != null}")
+
+        return DniData(
+            genero = parseGender(mrz),
+            nacionalidad = nacionalidad,
+            tipoDocumento = tipoDocumento,
+            numeroDocumento = numeroDocumento,
+            numeroSoporte = numeroDocumento,
+            nombre = nombre,
+            apellidos = apellidos,
+            nombrePadre = null,
+            nombreMadre = null,
+            fechaNacimiento = fechaNacimiento,
+            lugarNacimiento = lugarNacimiento,
+            domicilio = domicilio,
+            uid = rawData.uid,
+            can = rawData.can,
+            error = errorMessage,
+            documentType = classifier.documentType.name,
+            countryCode = classifier.countryCode,
+            countryName = classifier.countryName,
+            architecture = classifier.architecture.name,
+            readerMethod = rawData.readerMethod.name,
+            accessMethodDetail = rawData.accessMethodDetail,
+            fallbackUsed = rawData.fallbackUsed
+        )
+    }
+
+    private fun parseEuropeanIdCard(rawData: RawNfcData, mrz: MRZInfo, classifier: ClassificationResult): DniData {
+        Log.i(TAG, "parseEuropeanIdCard() - Parseando ID card europeo de ${classifier.countryCode}")
+
+        val dg11 = rawData.dataGroups[11]?.let { safe { JmrtdDG11File(ByteArrayInputStream(it)) } }
+
+        val nombre = mrz.secondaryIdentifierComponents
+            ?.mapNotNull { normalizeMrzText(it) }
+            ?.filter { it.isNotBlank() }
+            ?.joinToString(" ")
+            ?.takeIf { it.isNotBlank() }
+
+        val apellidos = normalizeMrzText(mrz.primaryIdentifier)
+        val numeroDocumento = normalizeMrzText(mrz.documentNumber)
+        val nacionalidad = normalizeMrzText(mrz.nationality) ?: classifier.countryCode
+        val tipoDocumento = "Documento de Identidad"
+        val fechaNacimiento = formatDate(mrz.dateOfBirth)
+
+        val lugarNacimiento = dg11?.placeOfBirth
+            ?.mapNotNull { normalizeMrzText(it) }
+            ?.joinToString(", ")
+            ?.takeIf { it.isNotBlank() }
+
+        val domicilio = dg11?.permanentAddress
+            ?.mapNotNull { normalizeMrzText(it) }
+            ?.joinToString(", ")
+            ?.takeIf { it.isNotBlank() }
+
+        val errorMessage = when {
+            rawData.sessionStatus == NfcSessionStatus.PARTIAL && !rawData.sessionError.isNullOrBlank() -> rawData.sessionError
+            nombre == null && apellidos == null && numeroDocumento == null -> "No se pudieron extraer datos clave del documento"
+            else -> null
+        }
+
+        return DniData(
+            genero = parseGender(mrz),
+            nacionalidad = nacionalidad,
+            tipoDocumento = tipoDocumento,
+            numeroDocumento = numeroDocumento,
+            numeroSoporte = numeroDocumento,
+            nombre = nombre,
+            apellidos = apellidos,
+            nombrePadre = null,
+            nombreMadre = null,
+            fechaNacimiento = fechaNacimiento,
+            lugarNacimiento = lugarNacimiento,
+            domicilio = domicilio,
+            uid = rawData.uid,
+            can = rawData.can,
+            error = errorMessage,
+            documentType = classifier.documentType.name,
+            countryCode = classifier.countryCode,
+            countryName = classifier.countryName,
+            architecture = classifier.architecture.name,
+            readerMethod = rawData.readerMethod.name,
+            accessMethodDetail = rawData.accessMethodDetail,
+            fallbackUsed = rawData.fallbackUsed
+        )
     }
 
     private fun parseSpanishRawData(rawData: RawNfcData): DniData {

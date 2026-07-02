@@ -10,7 +10,9 @@ data class DataGroupInfo(
     val sizeBytes: Int? = null,
     val sha256: String? = null,
     val exceptionType: String? = null,
-    val exceptionMessage: String? = null
+    val exceptionMessage: String? = null,
+    val tlvNodes: Int? = null,
+    val hasValidASN1: Boolean? = null
 ) {
     companion object {
         fun read(index: Int, bytes: ByteArray): DataGroupInfo {

@@ -1,0 +1,11 @@
+<component name="libraryTable">
+  <library name="Gradle: artifacts:dniedroid-release:unspecified">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/dniedroid-release/build/.transforms/ae94f2e9ac4168173e1742de35220e38/jetified-dniedroid-release/jars/classes.jar!/" />
+      <root url="file://$PROJECT_DIR$/dniedroid-release/build/.transforms/ae94f2e9ac4168173e1742de35220e38/jetified-dniedroid-release/res" />
+      <root url="file://$PROJECT_DIR$/dniedroid-release/build/.transforms/ae94f2e9ac4168173e1742de35220e38/jetified-dniedroid-release/AndroidManifest.xml" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

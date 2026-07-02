@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/Sample_DNIe_App.iml" filepath="$PROJECT_DIR$/.idea/modules/Sample_DNIe_App.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/Sample_DNIe_App.app.iml" filepath="$PROJECT_DIR$/.idea/modules/app/Sample_DNIe_App.app.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/Sample_DNIe_App.app.androidTest.iml" filepath="$PROJECT_DIR$/.idea/modules/app/Sample_DNIe_App.app.androidTest.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/Sample_DNIe_App.app.main.iml" filepath="$PROJECT_DIR$/.idea/modules/app/Sample_DNIe_App.app.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/Sample_DNIe_App.app.unitTest.iml" filepath="$PROJECT_DIR$/.idea/modules/app/Sample_DNIe_App.app.unitTest.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/dniedroid-release/Sample_DNIe_App.dniedroid-release.iml" filepath="$PROJECT_DIR$/.idea/modules/dniedroid-release/Sample_DNIe_App.dniedroid-release.iml" />
+    </modules>
+  </component>
+</project>

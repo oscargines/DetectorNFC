@@ -2,15 +2,16 @@ package com.oscar.detectornfc
 
 import android.nfc.Tag
 import android.nfc.TagLostException
+import android.nfc.tech.IsoDep
 import android.util.Log
 import de.tsenger.androsmex.mrtd.DG1_Dnie
 import de.tsenger.androsmex.mrtd.DG11
 import de.tsenger.androsmex.mrtd.DG13
+import es.gob.fnmt.dniedroid.help.Loader
 import es.gob.jmulticard.card.CryptoCardException
+import es.gob.jmulticard.card.baseCard.mrtd.MrtdCard
 import es.gob.jmulticard.jse.provider.DnieProvider
-import es.gob.jmulticard.jse.provider.MrtdKeyStoreImpl
 import java.io.IOException
-import java.io.InputStream
 import java.lang.reflect.InvocationTargetException
 import java.security.GeneralSecurityException
 import java.security.Security
@@ -21,6 +22,47 @@ class DniReader(private val tag: Tag?) {
     private val PROVIDER_NAME = "DNIeJCAProvider"
     private val ACCESS_METHOD_DETAIL = "PACE-CAN / SDK español"
     private val ICAO_FALLBACK_REASON = "Este documento no parece compatible con el método español. Se utilizará un método ICAO alternativo."
+
+    companion object {
+        private var dependencyCheckResult: Boolean? = null
+
+        fun areDependenciesAvailable(): Boolean {
+            return dependencyCheckResult ?: checkDependenciesInternal().also {
+                dependencyCheckResult = it
+            }
+        }
+
+        private fun checkDependenciesInternal(): Boolean {
+            val requiredClasses = listOf(
+                "org.bouncycastle.asn1.ASN1Encodable",
+                "org.bouncycastle.asn1.ASN1ObjectIdentifier",
+                "org.bouncycastle.cms.CMSSignedData",
+                "org.bouncycastle.jce.provider.BouncyCastleProvider",
+                "es.gob.fnmt.dniedroid.help.Loader",
+                "es.gob.jmulticard.card.baseCard.mrtd.MrtdCard",
+                "es.gob.jmulticard.jse.provider.DnieProvider",
+                "de.tsenger.androsmex.mrtd.DG1_Dnie"
+            )
+            for (className in requiredClasses) {
+                try {
+                    Class.forName(className)
+                    Log.i("DniReader", "Dependencia OK: $className")
+                } catch (e: Throwable) {
+                    Log.e("DniReader", "Dependencia runtime ausente: $className - ${e.javaClass.simpleName}: ${e.message}", e)
+                    return false
+                }
+            }
+            Log.i("DniReader", "Todas las dependencias dniedroid están disponibles")
+            return true
+        }
+
+        fun isSpanishDocument(docCode: String?, issuer: String?): Boolean {
+            if (issuer.isNullOrBlank()) return false
+            if (issuer.uppercase() != "ESP") return false
+            val code = docCode?.trim()?.uppercase() ?: return false
+            return code.startsWith("C") || code.startsWith("I") || code.startsWith("D")
+        }
+    }
 
     fun readDniSync(can: String): RawNfcData {
         if (tag == null) {
@@ -73,37 +115,37 @@ class DniReader(private val tag: Tag?) {
         }
 
         return try {
-            Log.d(TAG, "Creando MrtdKeyStoreImpl con CAN=${maskSecret(can)}")
-            val mrtdImpl = MrtdKeyStoreImpl(can, tag)
-            Log.d(TAG, "Iniciando sesión PACE + lectura NFC (engineLoad)")
-            mrtdImpl.engineLoad(null as InputStream?, null)
-            Log.i(TAG, "Sesión NFC completada correctamente")
+            Log.d(TAG, "Iniciando sesión PACE + lectura NFC con Loader (CAN=${maskSecret(can)})")
+            val initInfo = Loader.init(arrayOf(can), tag)
+            val mrtdCard = initInfo.mrtdCardInfo
+            val selectedCan = initInfo.can
+            Log.i(TAG, "Sesión NFC completada correctamente. CAN seleccionado=${maskSecret(selectedCan ?: "")}")
 
             val dgMap = mutableMapOf<Int, ByteArray?>()
             val dgAnalysis = mutableMapOf<Int, DataGroupInfo>()
             var fatalSessionError: String? = null
 
             fatalSessionError = readDg(1, dgMap, dgAnalysis) {
-                (mrtdImpl.getDataGroup1() as DG1_Dnie?)?.getBytes()
+                (mrtdCard.dataGroup1 as DG1_Dnie?)?.getBytes()
             }
             if (fatalSessionError == null) {
                 fatalSessionError = readDg(11, dgMap, dgAnalysis) {
-                    (mrtdImpl.getDataGroup11() as DG11?)?.getBytes()
+                    (mrtdCard.dataGroup11 as DG11?)?.getBytes()
                 }
             }
             if (fatalSessionError == null) {
                 fatalSessionError = readDg(13, dgMap, dgAnalysis) {
-                    (mrtdImpl.getDataGroup13() as DG13?)?.getBytes()
+                    (mrtdCard.dataGroup13 as DG13?)?.getBytes()
                 }
             }
             if (fatalSessionError == null) {
-                fatalSessionError = readDg(2, dgMap, dgAnalysis) { readDgByReflection(mrtdImpl, 2) }
+                fatalSessionError = readDg(2, dgMap, dgAnalysis) { readDgByReflection(mrtdCard, 2) }
             }
             if (fatalSessionError == null) {
-                fatalSessionError = readDg(7, dgMap, dgAnalysis) { readDgByReflection(mrtdImpl, 7) }
+                fatalSessionError = readDg(7, dgMap, dgAnalysis) { readDgByReflection(mrtdCard, 7) }
             }
             if (fatalSessionError == null) {
-                fatalSessionError = readDg(15, dgMap, dgAnalysis) { readDgByReflection(mrtdImpl, 15) }
+                fatalSessionError = readDg(15, dgMap, dgAnalysis) { readDgByReflection(mrtdCard, 15) }
             }
 
             if (fatalSessionError != null) {
@@ -132,7 +174,7 @@ class DniReader(private val tag: Tag?) {
             Log.i(TAG, "Lectura completada. DGs OK: $available, sessionStatus=$sessionStatus")
             RawNfcData(
                 uid = uid,
-                can = can,
+                can = selectedCan,
                 dataGroups = dgMap,
                 sod = null,
                 dgAnalysis = dgAnalysis,
@@ -146,10 +188,20 @@ class DniReader(private val tag: Tag?) {
 
         } catch (e: CryptoCardException) {
             Log.e(TAG, "Error de tarjeta (CAN incorrecto o tarjeta bloqueada): ${e.message}", e)
-            buildFailureResult(uid, "Error de tarjeta. Verifica CAN o estado del documento.")
+            val fb = suggestIcaoFallbackFromThrowable(e)
+            if (fb != null) {
+                buildFailureResult(uid, "El documento no es compatible con el método español.", fb)
+            } else {
+                buildFailureResult(uid, "Error de tarjeta. Verifica CAN o estado del documento.")
+            }
         } catch (e: GeneralSecurityException) {
             Log.e(TAG, "Error de seguridad durante PACE: ${e.message}", e)
-            buildFailureResult(uid, "Fallo de seguridad durante PACE.")
+            val fb = suggestIcaoFallbackFromThrowable(e)
+            if (fb != null) {
+                buildFailureResult(uid, "El documento no es compatible con el método español.", fb)
+            } else {
+                buildFailureResult(uid, "Fallo de seguridad durante PACE.")
+            }
         } catch (e: IOException) {
             Log.e(TAG, "Error E/S al leer DNIe (documento retirado?): ${e.message}", e)
             buildFailureResult(uid, "Se ha perdido la conexion con el DNIe. Manten el documento inmovil y reintenta.")
@@ -158,11 +210,16 @@ class DniReader(private val tag: Tag?) {
             buildFailureResult(uid, "Error de dependencias de la libreria NFC.")
         } catch (e: RuntimeException) {
             Log.e(TAG, "Error de ejecución durante la lectura NFC: ${e.message}", e)
-            buildFailureResult(
-                uid,
-                "Error de ejecucion durante la lectura NFC.",
-                suggestIcaoFallbackFromThrowable(e)
-            )
+            val cause = unwrapThrowable(e)
+            if (isFatalCommunicationError(cause)) {
+                buildFailureResult(uid, "Se ha perdido la conexion con el DNIe. Manten el documento inmovil y reintenta.")
+            } else {
+                buildFailureResult(
+                    uid,
+                    "Error de ejecucion durante la lectura NFC.",
+                    suggestIcaoFallbackFromThrowable(e)
+                )
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error inesperado: ${e.javaClass.simpleName}: ${e.message}", e)
             buildFailureResult(
@@ -170,6 +227,12 @@ class DniReader(private val tag: Tag?) {
                 "Error inesperado durante la lectura NFC.",
                 suggestIcaoFallbackFromThrowable(e)
             )
+        } finally {
+            runCatching {
+                tag?.let { IsoDep.get(it)?.close() }
+            }.onFailure {
+                Log.w(TAG, "Error cerrando IsoDep tras lectura DNIe: ${it.message}")
+            }
         }
     }
 
@@ -193,22 +256,7 @@ class DniReader(private val tag: Tag?) {
     }
 
     private fun hasRequiredRuntimeDependencies(): Boolean {
-        val requiredClasses = listOf(
-            "org.bouncycastle.asn1.ASN1Encodable",
-            "org.bouncycastle.asn1.DERObjectIdentifier",
-            "org.bouncycastle.cms.CMSSignedData",
-            "org.bouncycastle.jce.provider.BouncyCastleProvider"
-        )
-        for (className in requiredClasses) {
-            try {
-                Class.forName(className)
-                Log.d(TAG, "Dependencia runtime disponible: $className")
-            } catch (e: Throwable) {
-                Log.e(TAG, "Dependencia runtime ausente: $className", e)
-                return false
-            }
-        }
-        return true
+        return areDependenciesAvailable()
     }
 
     private fun readDg(
@@ -272,18 +320,27 @@ class DniReader(private val tag: Tag?) {
             it.status == DGStatus.UNSUPPORTED_ON_DOCUMENT || it.status == DGStatus.NOT_PRESENT_OR_NOT_ALLOWED
         }
         val hasApduHint = dgAnalysis.values.any { containsCompatibilityHint(it.exceptionMessage) }
-        return if (hasStatusHint || hasApduHint) ICAO_FALLBACK_REASON else null
+        if (hasStatusHint || hasApduHint) return ICAO_FALLBACK_REASON
+
+        val allNonFatalErrors = dgAnalysis.values.all {
+            it.status == DGStatus.READ_ERROR ||
+            it.status == DGStatus.NOT_PRESENT_OR_NOT_ALLOWED ||
+            it.status == DGStatus.UNSUPPORTED_ON_DOCUMENT
+        }
+        if (allNonFatalErrors && dgAnalysis.size >= 3) {
+            val noCommunicationError = dgAnalysis.values.none { dg ->
+                dg.exceptionMessage?.contains("Conexión NFC perdida", ignoreCase = true) == true
+            }
+            if (noCommunicationError) {
+                return ICAO_FALLBACK_REASON
+            }
+        }
+        return null
     }
 
     private fun suggestIcaoFallbackFromThrowable(error: Throwable): String? {
         val cause = unwrapThrowable(error)
-        if (
-            cause is CryptoCardException ||
-            cause is GeneralSecurityException ||
-            cause is IOException ||
-            cause is LinkageError ||
-            isFatalCommunicationError(cause)
-        ) {
+        if (cause is IOException || cause is LinkageError || isFatalCommunicationError(cause)) {
             return null
         }
         return if (containsCompatibilityHint(cause.message)) ICAO_FALLBACK_REASON else null
@@ -293,13 +350,23 @@ class DniReader(private val tag: Tag?) {
         val normalized = message?.lowercase() ?: return false
         return normalized.contains("6a82") ||
             normalized.contains("6988") ||
+            normalized.contains("6a86") ||
+            normalized.contains("6d00") ||
+            normalized.contains("6e00") ||
             normalized.contains("file not found") ||
             normalized.contains("not found") ||
             normalized.contains("unsupported") ||
             normalized.contains("not supported") ||
             normalized.contains("select applet") ||
             normalized.contains("aid") ||
-            normalized.contains("icao")
+            normalized.contains("icao") ||
+            normalized.contains("cla not supported") ||
+            normalized.contains("ins not supported") ||
+            normalized.contains("instruction code") ||
+            normalized.contains("no such") ||
+            normalized.contains("does not exist") ||
+            normalized.contains("no existe") ||
+            normalized.contains("no compatible")
     }
 
     private fun isFatalCommunicationError(error: Throwable): Boolean {
@@ -311,12 +378,12 @@ class DniReader(private val tag: Tag?) {
             message.contains("Se ha perdido la conexión", ignoreCase = true)
     }
 
-    private fun readDgByReflection(mrtdImpl: MrtdKeyStoreImpl, dgIndex: Int): ByteArray? {
+    private fun readDgByReflection(mrtdCard: MrtdCard, dgIndex: Int): ByteArray? {
         val methodCandidates = listOf("getDataGroup$dgIndex", "getDatagroup$dgIndex", "getDg$dgIndex", "getDg${dgIndex}Bytes")
-        val clazz = mrtdImpl.javaClass
+        val clazz = mrtdCard.javaClass
         for (name in methodCandidates) {
             val method = clazz.methods.firstOrNull { it.name == name && it.parameterCount == 0 } ?: continue
-            val result = method.invoke(mrtdImpl) ?: continue
+            val result = method.invoke(mrtdCard) ?: continue
             val bytes = when (result) {
                 is ByteArray -> result
                 else -> {

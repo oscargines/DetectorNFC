@@ -1,0 +1,5 @@
+Contenido del proyecto:
+- com.fnmt.sample_dnie_app.datareader: ejemplos de lectura de diferentes datos almacenados en el DNIe.
+- com.fnmt.sample_dnie_app.signature: ejemplos de uso del DNIe para firma digital.
+- com.fnmt.sample_dnie_app.network: ejemplos de uso del DNIe para autenticación a través de la red.
+- com.fnmt.sample_dnie_app.utils.OCSP: clase que encapsula la verificación online del estado de los certificados según el protocolo OCSP (Online Certificate Status Protocol).

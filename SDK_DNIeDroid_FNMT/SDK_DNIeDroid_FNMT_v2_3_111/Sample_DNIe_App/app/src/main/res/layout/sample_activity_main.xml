@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="fill_parent"
+              android:layout_height="fill_parent"
+              android:background="@color/bg_gray"
+              android:orientation="vertical"
+              android:keepScreenOn="true"
+              android:id="@+id/sample_container">
+    <TextView
+        android:id="@+id/base_info"
+        android:visibility="visible"
+        android:layout_height="wrap_content"
+        android:layout_width="wrap_content"
+        android:layout_gravity="center"
+        android:text="DNIe ejemplos"
+        android:textColor="@color/TextColor"
+        android:textSize="20sp"
+        android:textStyle="bold"/>
+    <TextView
+        android:id="@+id/dniedroidinfo"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:layout_marginTop="15dp"
+        android:text="libreria dniedroid"
+        android:textColor="@color/TextColor"
+        android:textSize="16sp"/>
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:layout_gravity="center"
+        android:gravity="center">
+        <Button
+            android:id="@+id/reader_button"
+            android:background="@drawable/button_shape"
+            android:padding="15dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/PureWhite"
+            android:text="Leer datos"
+            android:layout_gravity="center"
+            android:textSize="20sp"
+            android:layout_margin="15dp"/>
+        <Button
+            android:id="@+id/age_button"
+            android:background="@drawable/button_shape"
+            android:padding="15dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/PureWhite"
+            android:text="Comprobar edad"
+            android:layout_gravity="center"
+            android:textSize="20sp"
+            android:layout_margin="15dp"/>
+        <Button
+            android:id="@+id/signature_button"
+            android:background="@drawable/button_shape"
+            android:padding="15dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/PureWhite"
+            android:text="Firma"
+            android:layout_gravity="center"
+            android:textSize="20sp"
+            android:layout_margin="15dp"/>
+        <Button
+            android:id="@+id/authentication_button"
+            android:background="@drawable/button_shape"
+            android:padding="15dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/PureWhite"
+            android:text="Autenticación"
+            android:layout_gravity="center"
+            android:textSize="20sp"
+            android:layout_margin="15dp"/>
+        <Button
+            android:id="@+id/can_button"
+            android:background="@drawable/button_shape"
+            android:padding="15dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/PureWhite"
+            android:text="Añadir can"
+            android:layout_gravity="center"
+            android:textSize="20sp"
+            android:layout_margin="15dp"/>
+    </LinearLayout>
+</LinearLayout>
+

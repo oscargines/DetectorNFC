@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_gray"
+    android:orientation="vertical"
+    android:id="@+id/sample_container"
+    android:keepScreenOn="true">
+
+    <TextView
+        android:id="@+id/base_info"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentTop="true"
+        android:layout_centerHorizontal="true"
+        android:layout_marginStart="10dip"
+        android:text="Ejemplo Dnie Activity"
+        android:textColor="@color/TextColor"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:visibility="visible" />
+
+    <TextView
+        android:id="@+id/result_info"
+        android:visibility="gone"
+        android:layout_height="wrap_content"
+        android:layout_width="wrap_content"
+        android:layout_below="@id/base_info"
+        android:layout_centerHorizontal="true"
+        android:layout_margin="5dp"
+        android:layout_gravity="center"
+        android:text="Resultado"
+        android:textColor="@color/TextColor"
+        android:textSize="18sp"/>
+
+    <LinearLayout
+        android:id="@+id/date_age"
+        android:visibility="gone"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/result_info"
+        android:orientation="horizontal"
+        android:layout_margin="10dp"
+        android:baselineAligned="false">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:layout_weight="1">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="18dp"
+                android:text="Fecha de nacimiento a comparar"
+                android:textColor="@color/black"/>
+
+            <DatePicker
+                android:id="@+id/date"
+                android:datePickerMode ="spinner"
+                android:calendarViewShown="false"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="20dp"
+                android:text="Edad"
+                android:textColor="@color/black"/>
+
+            <Spinner
+                android:id="@+id/age"
+                android:spinnerMode="dropdown"
+                android:layout_width="50dp"
+                android:layout_height="wrap_content"
+                android:entries="@array/ages_array"/>
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <com.fnmt.sample_dnie_app.utils.graphic.CanvasView
+        android:id="@+id/canvas"
+        android:visibility="gone"
+        android:layout_width="match_parent"
+        android:layout_height="250dp"
+        android:layout_below="@id/date_age"
+        android:background="@color/PureWhite"
+        android:layout_marginTop="10dp"
+        android:layout_marginStart="25dp"
+        android:layout_marginEnd="25dp"/>
+
+    <ProgressBar
+        android:id="@+id/progressBar"
+        android:visibility="gone"
+        style="@android:style/Widget.ProgressBar.Horizontal"
+        android:layout_height="wrap_content"
+        android:layout_width="160dp"
+        android:layout_below="@id/result_info"
+        android:layout_centerHorizontal="true"
+        android:layout_marginTop="10dp"
+        android:layout_marginBottom="10dp"
+        android:max="100"/>
+
+    <ImageView
+        android:id="@+id/dnieImg"
+        android:visibility="gone"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/progressBar"
+        android:contentDescription="@string/lib_nfc_logo_desc"
+        android:src="@drawable/dni30_grey_peq"/>
+
+    <Button
+        android:id="@+id/back2main"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:layout_centerHorizontal="true"
+        android:text="Inicio"
+        android:textSize="22sp"
+        android:padding="15sp"/>
+
+</RelativeLayout>
+

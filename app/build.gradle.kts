@@ -86,9 +86,11 @@ dependencies {
     implementation(files("libs/dniedroid-release.aar"))
 
     // --- BouncyCastle ---
-    // dniedroid-release.aar referencia clases ASN.1 y PKIX en tiempo de ejecución.
+    // dniedroid-release.aar referencia clases ASN.1, PKIX y CMS en tiempo de ejecución.
     implementation(libs.bouncycastle.prov)
     implementation(libs.bouncycastle.pkix)
+    implementation(libs.bouncycastle.mail)
+    implementation(libs.bouncycastle.tls)
 
     // --- Fallback ICAO/JMRTD para documentos no españoles ---
     implementation("org.jmrtd:jmrtd:0.7.31") {

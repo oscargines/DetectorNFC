@@ -1,0 +1,34 @@
+/****************************************************************\
+ * Kit de desarrollo software para integración de aplicaciones 	*
+ * con DNIe                                                	*
+ * 11 de mayo 2023                                              * 
+\****************************************************************/
+CONTENIDO:
+
+- Documentación manual de integración: archivo droidfnmt_user_manual.pdf.
+- Librería para integración: directorio dniedroid_lib v2.3.111 vc111.
+- Documentación en formato JavaDoc: directorio JavaDoc.
+- Proyecto para Android Studio con ejemplo de integración de librería en aplicación Android: directorio Sample_Dnie_App.
+
+
+* La verificación de la librería se puede realizar con la herramienta 'jarsigner' del JDK, con el siguiente comando:
+[Path del JDK]\bin\jarsigner.exe -verify -verbose dniedroid-release.aar
+La salida del comando debería ser similar a la siguiente:
+
+s       4969 Mon Oct 25 12:34:04 CEST 2021 META-INF/MANIFEST.MF
+        5131 Mon Oct 25 12:34:04 CEST 2021 META-INF/CNP-FNMT.SF
+        1379 Mon Oct 25 12:34:04 CEST 2021 META-INF/CNP-FNMT.RSA
+...
+
+- Signed by "CN=CNP-FNMT, OU=DNI electronico, O=CNP-FNMT, L=Madrid, ST=Madrid, C=34"
+    Digest algorithm: SHA-256
+    Signature algorithm: SHA256withRSA, 2048-bit key
+
+jar verified.
+
+...
+
+
+PROYECTO DE EJEMPLO PARA ANDROID STUDIO:
+
+Este proyecto recoge la funcionalidad disponible en las tarjetas DNIe 3.0/4.0, a través de ejemplos sencillos de uso. Los ejemplos de autenticación indicados son dependientes de servicios públicos de la Administración Electrónica. Es posible que dejen de funcionar correctamente debido a cambios en el servicio desde la publicación de esta release, y por tanto deberán ser adaptados. En cualquier caso, los ejemplos se pueden utilizar como base para realizar una autenticación con certificado de cliente utilizando un servicio conocido. Es posible que no todos los ejemplos funcionen, dependerá de las características de la tarjeta (p. ej. si tiene información de tipo MRTD, permiso de residencia, etc.).

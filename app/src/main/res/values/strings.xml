@@ -41,6 +41,12 @@
     <string name="label_doc_number">Número de documento</string>
     <string name="label_birth_date">Fecha de nacimiento</string>
     <string name="label_nationality">Nacionalidad</string>
+    <string name="label_gender">Sexo</string>
+    <string name="label_birth_place">Lugar de nacimiento</string>
+    <string name="label_address">Domicilio</string>
+    <string name="label_father_name">Nombre del padre</string>
+    <string name="label_mother_name">Nombre de la madre</string>
+    <string name="label_support_number">Número de soporte</string>
     <string name="label_error">Incidencia</string>
     <string name="no_photo_available">No se ha podido extraer una fotografía válida del chip.</string>
     <string name="no_signature_available">No se ha podido extraer una firma manuscrita válida del chip.</string>

@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Sample_Dnie_App</string>
+    <string-array name="ages_array">
+        <item>16</item>
+        <item>18</item>
+        <item>21</item>
+        <item>65</item>
+        <item>Custom</item>
+    </string-array>
+</resources>
