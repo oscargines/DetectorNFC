@@ -1,5 +1,5 @@
 [versions]
-agp             = "9.2.1"
+agp             = "9.4.1"
 # AGP 9.x incluye soporte Kotlin nativo (KGP 2.2.10 embebido).
 
 coreKtx           = "1.18.0"

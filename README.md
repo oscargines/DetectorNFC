@@ -4,6 +4,8 @@ Una aplicación Android para leer y procesar datos de documentos de identidad (D
 
 Diseñada como **herramienta de estudio** para comprender dónde y cómo se almacenan los datos en los chips de documentos de identidad europeos.
 
+> **Documentación técnica**: [docs/DOCUMENTACION_TECNICA.md](docs/DOCUMENTACION_TECNICA.md) (arquitectura, protocolos, informe PDF, firma y tests).
+
 ## Características
 
 - **Lectura de DNI Electrónico Español**: Soporte completo para DNI-e 3.0/4.0 y TIE mediante PACE-CAN con el SDK oficial DNIeDroid v2.3.111 (CNP-FNMT)

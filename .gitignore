@@ -13,3 +13,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Credenciales de firma de release (el keystore app/release.keystore SÍ se trackea)
+/keystore.properties
+

@@ -533,7 +533,7 @@
     </ScrollView>
 
     <!-- ══════════════════════════════════════════
-         BARRA INFERIOR — Compartir  |  Guardar
+         BARRA INFERIOR — Compartir  |  Guardar  |  Informe
          (estilo "Share Receipt / Report Issue" de la referencia)
     ══════════════════════════════════════════ -->
     <View
@@ -557,7 +557,7 @@
             android:layout_weight="1"
             android:text="@string/share_json"/>
 
-        <View android:layout_width="10dp" android:layout_height="match_parent"/>
+        <View android:layout_width="8dp" android:layout_height="match_parent"/>
 
         <Button
             android:id="@+id/btn_save_image"
@@ -566,6 +566,17 @@
             android:layout_height="@dimen/btn_height"
             android:layout_weight="1"
             android:text="@string/save_image"/>
+
+        <View android:layout_width="8dp" android:layout_height="match_parent"/>
+
+        <Button
+            android:id="@+id/btn_generate_report"
+            style="@style/Widget_DetectorNFC_PrimaryButton"
+            android:layout_width="0dp"
+            android:layout_height="@dimen/btn_height"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:text="@string/generate_report"/>
 
     </LinearLayout>
 

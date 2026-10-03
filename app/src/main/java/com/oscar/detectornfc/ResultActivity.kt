@@ -2,6 +2,8 @@ package com.oscar.detectornfc
 
 import android.content.ContentValues
 import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
@@ -17,6 +19,10 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import com.oscar.detectornfc.report.ReportData
+import com.oscar.detectornfc.report.ReportPdfGenerator
+import com.oscar.detectornfc.report.maskCAN
+import com.oscar.detectornfc.report.parseIdentity
 import de.tsenger.androsmex.mrtd.DG1_Dnie
 import de.tsenger.androsmex.mrtd.DG11
 import de.tsenger.androsmex.mrtd.DG13
@@ -26,6 +32,9 @@ import java.io.File
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class ResultActivity : AppCompatActivity() {
     companion object {
@@ -34,6 +43,9 @@ class ResultActivity : AppCompatActivity() {
 
     private var structData: RawStructureData? = null
     private var isStructureMode: Boolean = false
+    private var rawJson: String? = null
+    private var photoBitmap: Bitmap? = null
+    private var signatureBitmap: Bitmap? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,6 +54,8 @@ class ResultActivity : AppCompatActivity() {
         val btnShare = findViewById<Button>(R.id.btn_share)
         val btnBack = findViewById<Button>(R.id.btn_back)
         val btnSave = findViewById<Button>(R.id.btn_save_image)
+        val btnReport = findViewById<Button>(R.id.btn_generate_report)
+        btnReport.isEnabled = false
 
         val jsonPath = intent.getStringExtra(NFCScanActivity.EXTRA_JSON_PATH)
         val json = if (!jsonPath.isNullOrBlank()) {
@@ -54,6 +68,7 @@ class ResultActivity : AppCompatActivity() {
             intent.getStringExtra("JSON") ?: "{}"
         }
         Log.i(TAG, "onCreate() - jsonLength=${json.length}")
+        rawJson = json
 
         btnBack.setOnClickListener {
             Log.d(TAG, "Volver pulsado: cerrando ResultActivity")
@@ -76,6 +91,11 @@ class ResultActivity : AppCompatActivity() {
             }
         }
 
+        btnReport.setOnClickListener {
+            Log.d(TAG, "Generar informe pulsado")
+            generateReportPdf()
+        }
+
         try {
             val gson = com.google.gson.Gson()
             val struct = try {
@@ -94,6 +114,7 @@ class ResultActivity : AppCompatActivity() {
             }
 
             structData = struct
+            btnReport.isEnabled = true
             bindSummary(struct)
             bindWarning(struct)
             val hasPhoto = bindPhoto(struct)
@@ -191,99 +212,27 @@ class ResultActivity : AppCompatActivity() {
     }
 
     private fun bindIdentity(struct: RawStructureData) {
-        val det = struct.documentDetection
+        val info = parseIdentity(struct)
+        Log.d(
+            TAG,
+            "bindIdentity: nombre=${info.nombre != null}, doc=${info.numeroDocumento != null}"
+        )
 
-        val dg1Bytes = struct.dgRawBytes?.get(1)
-        val dg11Bytes = struct.dgRawBytes?.get(11)
-        val dg13Bytes = struct.dgRawBytes?.get(13)
-
-        val dg1 = dg1Bytes?.let { runCatching { DG1_Dnie(it) }.getOrNull() }
-        val dg11 = dg11Bytes?.let { runCatching { DG11(it) }.getOrNull() }
-        val dg13 = dg13Bytes?.let { runCatching { DG13(it) }.getOrNull() }
-
-        Log.d(TAG, "bindIdentity: dg1=${dg1 != null}, dg11=${dg11 != null}, dg13=${dg13 != null}")
-
-        val nombre = dg13?.getName()?.takeIf { it.isNotBlank() }
-            ?: dg11?.getName()?.takeIf { it.isNotBlank() }
-            ?: dg1?.getName()?.takeIf { it.isNotBlank() }
-
-        val apellidos = if (dg13 != null) {
-            val s1 = dg13.getSurName1()?.takeIf { it.isNotBlank() }
-            val s2 = dg13.getSurName2()?.takeIf { it.isNotBlank() }
-            when {
-                s1 != null && s2 != null -> "$s1 $s2"
-                s1 != null -> s1
-                else -> dg1?.getSurname()?.takeIf { it.isNotBlank() }
-            }
-        } else {
-            dg1?.getSurname()?.takeIf { it.isNotBlank() }
-        }
-
-        val numeroDocumento = dg13?.getPersonalNumber()?.takeIf { it.isNotBlank() }
-            ?: dg1?.getDocNumber()?.takeIf { it.isNotBlank() }
-
-        val fechaNacimiento = (dg13?.getBirthDate()
-            ?: dg11?.getBirthDate()
-            ?: dg1?.getDateOfBirth())?.takeIf { it.isNotBlank() }
-
-        val nacionalidad = dg1?.getNationality()?.takeIf { it.isNotBlank() } ?: "ESP"
-        val tipoDocumento = dg1?.getDocType()?.takeIf { it.isNotBlank() } ?: det?.documentType
-
-        val genero = (dg13?.getSex() ?: dg1?.getSex())?.uppercase()?.let {
-            when (it) {
-                "F" -> "Femenino"
-                "M" -> "Masculino"
-                else -> null
-            }
-        }
-
-        val lugarNacimiento = if (dg13 != null) {
-            listOfNotNull(dg13.getBirthPopulation(), dg13.getBirthProvince())
-                .filter { it.isNotBlank() }
-                .joinToString(", ")
-                .takeIf { it.isNotBlank() }
-                ?: dg11?.getBirthPlace()?.takeIf { it.isNotBlank() }
-        } else {
-            dg11?.getBirthPlace()?.takeIf { it.isNotBlank() }
-        }
-
-        val domicilio = if (dg13 != null) {
-            listOfNotNull(
-                dg13.getActualAddress(),
-                dg13.getActualPopulation(),
-                dg13.getActualProvince()
-            ).filter { it.isNotBlank() }.joinToString(", ").takeIf { it.isNotBlank() }
-        } else if (dg11 != null) {
-            listOfNotNull(
-                dg11.getAddress(DG11.ADDR_DIRECCION),
-                dg11.getAddress(DG11.ADDR_LOCALIDAD),
-                dg11.getAddress(DG11.ADDR_PROVINCIA)
-            ).filter { it.isNotBlank() }.joinToString(", ").takeIf { it.isNotBlank() }
-        } else {
-            null
-        }
-
-        setInfoText(R.id.tv_name, R.string.label_name, nombre)
-        setInfoText(R.id.tv_surname, R.string.label_surname, apellidos)
-        setInfoText(R.id.tv_doc_number, R.string.label_doc_number, numeroDocumento)
-        setInfoText(R.id.tv_birth_date, R.string.label_birth_date, fechaNacimiento)
-        setInfoText(R.id.tv_nationality, R.string.label_nationality, nacionalidad)
-        setInfoText(R.id.tv_gender, R.string.label_gender, genero)
-        setInfoText(R.id.tv_birth_place, R.string.label_birth_place, lugarNacimiento)
-        setInfoText(R.id.tv_address, R.string.label_address, domicilio)
-        setInfoText(R.id.tv_father_name, R.string.label_father_name, dg13?.getFatherName()?.takeIf { it.isNotBlank() })
-        setInfoText(R.id.tv_mother_name, R.string.label_mother_name, dg13?.getMotherName()?.takeIf { it.isNotBlank() })
-        setInfoText(R.id.tv_support_number, R.string.label_support_number, dg1?.getDocNumber()?.takeIf { it.isNotBlank() })
-        setInfoText(R.id.tv_type, R.string.label_doc_type, tipoDocumento)
-        setInfoText(R.id.tv_country, R.string.label_country, listOf(det?.countryCode, det?.countryName).filterNotNull().joinToString(" ").ifBlank { null })
-        setInfoText(R.id.tv_architecture, R.string.label_architecture, det?.architecture)
-
-        val protocols = det?.supportedProtocols
-        if (!protocols.isNullOrEmpty()) {
-            setInfoText(R.id.tv_error_value, R.string.label_error, "Protocolos: ${protocols.joinToString(", ")}")
-        } else {
-            setInfoText(R.id.tv_error_value, R.string.label_error, null)
-        }
+        setInfoText(R.id.tv_name, R.string.label_name, info.nombre)
+        setInfoText(R.id.tv_surname, R.string.label_surname, info.apellidos)
+        setInfoText(R.id.tv_doc_number, R.string.label_doc_number, info.numeroDocumento)
+        setInfoText(R.id.tv_birth_date, R.string.label_birth_date, info.fechaNacimiento)
+        setInfoText(R.id.tv_nationality, R.string.label_nationality, info.nacionalidad)
+        setInfoText(R.id.tv_gender, R.string.label_gender, info.genero)
+        setInfoText(R.id.tv_birth_place, R.string.label_birth_place, info.lugarNacimiento)
+        setInfoText(R.id.tv_address, R.string.label_address, info.domicilio)
+        setInfoText(R.id.tv_father_name, R.string.label_father_name, info.padre)
+        setInfoText(R.id.tv_mother_name, R.string.label_mother_name, info.madre)
+        setInfoText(R.id.tv_support_number, R.string.label_support_number, info.numeroSoporte)
+        setInfoText(R.id.tv_type, R.string.label_doc_type, info.tipoDocumento)
+        setInfoText(R.id.tv_country, R.string.label_country, info.pais)
+        setInfoText(R.id.tv_architecture, R.string.label_architecture, info.arquitectura)
+        setInfoText(R.id.tv_error_value, R.string.label_error, info.protocolos)
     }
 
     private fun bindWarning(struct: RawStructureData) {
@@ -310,6 +259,7 @@ class ResultActivity : AppCompatActivity() {
     private fun bindPhoto(struct: RawStructureData): Boolean {
         val ivPhoto = findViewById<ImageView>(R.id.iv_photo)
         val tvPhotoPlaceholder = findViewById<TextView>(R.id.tv_photo_placeholder)
+        photoBitmap = null
         return try {
             val dg2Bytes = extractPhotoBytes(struct)
             if (dg2Bytes != null) {
@@ -317,6 +267,7 @@ class ResultActivity : AppCompatActivity() {
                 Log.d(TAG, "DG2 render - bytes=${dg2Bytes.size}, formato=${result.format}, decoded=${result.success}")
 
                 if (result.bitmap != null) {
+                    photoBitmap = result.bitmap
                     ivPhoto.setImageBitmap(result.bitmap)
                     ivPhoto.visibility = View.VISIBLE
                     tvPhotoPlaceholder.visibility = View.GONE
@@ -351,11 +302,13 @@ class ResultActivity : AppCompatActivity() {
     private fun bindSignature(struct: RawStructureData): Boolean {
         val ivSignature = findViewById<ImageView>(R.id.iv_signature)
         val tvSignaturePlaceholder = findViewById<TextView>(R.id.tv_signature_placeholder)
+        signatureBitmap = null
         return try {
             val dg7Bytes = extractSignatureBytes(struct)
             if (dg7Bytes != null) {
                 val result = ImageDecoder.decode(dg7Bytes)
                 if (result.bitmap != null) {
+                    signatureBitmap = result.bitmap
                     ivSignature.setImageBitmap(result.bitmap)
                     ivSignature.visibility = View.VISIBLE
                     tvSignaturePlaceholder.visibility = View.GONE
@@ -686,6 +639,115 @@ class ResultActivity : AppCompatActivity() {
         }
     }
 
+    private fun generateReportPdf() {
+        val struct = structData ?: return
+        val btnReport = findViewById<Button>(R.id.btn_generate_report)
+        if (!btnReport.isEnabled) return
+        btnReport.isEnabled = false
+        btnReport.alpha = 0.5f
+
+        val report = buildReportData(struct)
+        val fileName = buildReportFileName(report)
+        Log.i(TAG, "Generando informe PDF: $fileName")
+
+        Thread {
+            try {
+                val outFile = File(cacheDir, fileName)
+                ReportPdfGenerator(applicationContext).generate(report, outFile)
+                val saved = saveReportToDocuments(outFile) != null
+                Log.i(TAG, "Informe generado: ${outFile.absolutePath} (guardado=$saved)")
+                runOnUiThread {
+                    btnReport.isEnabled = true
+                    btnReport.alpha = 1f
+                    Toast.makeText(
+                        this,
+                        getString(if (saved) R.string.report_saved else R.string.report_shared_only),
+                        Toast.LENGTH_LONG
+                    ).show()
+                    sharePdf(outFile)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error generando informe PDF: ${e.message}", e)
+                runOnUiThread {
+                    btnReport.isEnabled = true
+                    btnReport.alpha = 1f
+                    Toast.makeText(
+                        this,
+                        getString(R.string.error_generating_report),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun buildReportData(struct: RawStructureData): ReportData {
+        val json = rawJson
+        return ReportData(
+            identity = parseIdentity(struct),
+            uid = struct.uid,
+            can = struct.can,
+            scanTimestamp = struct.scanTimestamp,
+            readerMethod = struct.readerMethod,
+            fallbackUsed = struct.fallbackUsed,
+            sessionStatus = struct.sessionStatus.name,
+            sessionError = struct.sessionError,
+            dataGroups = (struct.dgRawBytes.keys + struct.dgAnalysis.keys).distinct().sorted(),
+            photo = photoBitmap,
+            signature = signatureBitmap,
+            jsonSha256 = json?.toByteArray()?.let { sha256(it) }
+        )
+    }
+
+    private fun buildReportFileName(report: ReportData): String {
+        val id = report.identity.numeroDocumento?.trim().takeUnless { it.isNullOrBlank() }
+            ?: report.uid?.trim().takeUnless { it.isNullOrBlank() }
+            ?: "sin_documento"
+        val safeId = id.replace(Regex("[^A-Za-z0-9-]"), "")
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        return "informe_${safeId}_$ts.pdf"
+    }
+
+    private fun saveReportToDocuments(file: File): Uri? {
+        return try {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "Documents/DetectorNFC")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = contentResolver.insert(MediaStore.Files.getContentUri("external"), values)
+                ?: return null
+            contentResolver.openOutputStream(uri)?.use { out ->
+                file.inputStream().use { it.copyTo(out) }
+            }
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            contentResolver.update(uri, values, null, null)
+            uri
+        } catch (e: Exception) {
+            Log.e(TAG, "Error guardando informe en Documents: ${e.message}", e)
+            null
+        }
+    }
+
+    private fun sharePdf(file: File) {
+        try {
+            val uri = FileProvider.getUriForFile(
+                this, "${applicationContext.packageName}.fileprovider", file
+            )
+            val share = Intent(Intent.ACTION_SEND).apply {
+                type = "application/pdf"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(share, getString(R.string.share_report)))
+        } catch (e: Exception) {
+            Log.e(TAG, "Error compartiendo informe: ${e.message}", e)
+            Toast.makeText(this, getString(R.string.error_generating_report), Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun showFallbackError(json: String) {
         findViewById<View>(R.id.card_warning).visibility = View.VISIBLE
         findViewById<TextView>(R.id.tv_warning).text = getString(R.string.generic_result_error)
@@ -799,12 +861,6 @@ class ResultActivity : AppCompatActivity() {
             }
             else -> null
         }
-    }
-
-    private fun maskCAN(can: String?): String? {
-        if (can == null) return null
-        if (can.length <= 2) return "*".repeat(can.length)
-        return "${can.take(1)}${"*".repeat(can.length - 2)}${can.takeLast(1)}"
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

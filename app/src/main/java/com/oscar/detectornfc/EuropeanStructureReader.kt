@@ -6,27 +6,42 @@ import android.nfc.tech.IsoDep
 import android.util.Log
 import net.sf.scuba.smartcards.CardServiceException
 import net.sf.scuba.smartcards.IsoDepCardService
+import org.jmrtd.BACKey
 import org.jmrtd.PACEKeySpec
 import org.jmrtd.PassportService
 import org.jmrtd.lds.CardAccessFile
 import org.jmrtd.lds.PACEInfo
-import org.jmrtd.lds.SecurityInfo
 import org.jmrtd.lds.ChipAuthenticationInfo
 import org.jmrtd.lds.ChipAuthenticationPublicKeyInfo
 import org.jmrtd.lds.TerminalAuthenticationInfo
 import org.jmrtd.lds.icao.DG1File
 import org.jmrtd.lds.icao.DG2File
 import org.jmrtd.lds.icao.DG7File
-import org.jmrtd.lds.icao.DG11File
 import org.jmrtd.lds.icao.MRZInfo
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.security.MessageDigest
 
+/**
+ * Lector universal para documentos de identidad europeos (ICAO 9303).
+ *
+ * Negociación de acceso según el documento detectado:
+ *  1. PACE-CAN     → DNIe/TIE español, ID Países Bajos, Cartão de Cidadão 2024+,
+ *                    CIE italiano, eDO polaco.
+ *  2. PACE-MRZ     → documentos con EF.CardAccess cuya contraseña es el MRZ
+ *                    (CNIe francesa, pasaportes modernos).
+ *  3. PACE-PIN     → eID alemán (los datos requieren además TA/EAC).
+ *  4. BAC          → pasaportes sin PACE (BAC clásico con clave derivada del MRZ).
+ *
+ * La eID alemana (Personalausweis) no expone el applet ICAO eMRTD: se selecciona
+ * el MF directamente, se establece PACE con el CAN y se vuelca la estructura del
+ * chip (EF.CardAccess), pero los datos personales requieren Terminal
+ * Authentication con certificados oficiales del BSI (EAC v2) y no son legibles
+ * por aplicaciones de terceros.
+ */
 class EuropeanStructureReader(private val tag: Tag?) {
 
     private val tagName = "EuroReader"
-    private val accessMethodDetail = "PACE-CAN / European Universal"
     private val maxRetries = 3
 
     companion object {
@@ -44,12 +59,22 @@ class EuropeanStructureReader(private val tag: Tag?) {
         private val UNIVERSAL_DG_ORDER = listOf(1, 2, 7, 11, 12, 13, 15, 16, 3, 4, 5, 6, 8, 9, 10, 14)
 
         private val ESSENTIAL_DGS = setOf(1, 2)
-        private val OPTIONAL_DGS = setOf(7, 11, 12, 13, 15, 16)
+
+        private const val GERMAN_EID_EXPLANATION =
+            "Documento eID alemán detectado: se ha establecido el canal seguro PACE con el CAN " +
+                "y se ha volcado la estructura del chip, pero los datos personales de la eID " +
+                "alemana solo son legibles tras una Terminal Authentication (EAC v2) con " +
+                "certificados de terminal autorizados por el BSI alemán, reservados a " +
+                "terminales oficiales. Ninguna aplicación de terceros puede leerlos."
     }
 
-    fun readAllStructures(can: String): RawStructureData {
+    /** Compatibilidad: lectura con solo CAN (DNIe/TIE, ID NL, CC PT). */
+    fun readAllStructures(can: String): RawStructureData =
+        readAllStructures(AccessCredentials.withCan(can))
+
+    fun readAllStructures(credentials: AccessCredentials): RawStructureData {
         Log.i(tagName, "====== readAllStructures() INICIO ======")
-        Log.i(tagName, "tag=${tag != null}, can.length=${can.length}, can.isBlank=${can.isBlank()}")
+        Log.i(tagName, "tag=${tag != null}, methods=${credentials.describe()}")
 
         if (tag == null) {
             Log.e(tagName, "FAIL: tag es null")
@@ -58,15 +83,22 @@ class EuropeanStructureReader(private val tag: Tag?) {
         val uid = formatUid(tag.id)
         Log.i(tagName, "uid=$uid, techs=${tag.techList.joinToString()}")
 
-        if (can.isBlank()) {
-            Log.e(tagName, "FAIL: CAN vacío")
-            return failure(uid, "CAN vacío. No se puede iniciar PACE.")
+        if (!credentials.hasAnyAccessMethod()) {
+            Log.e(tagName, "FAIL: sin credenciales de acceso (CAN/MRZ/PIN)")
+            return failure(
+                uid,
+                "No se han introducido credenciales de acceso. Usa el CAN del documento o los datos del MRZ (número, fecha de nacimiento y caducidad)."
+            )
         }
 
         val isoDep = IsoDep.get(tag)
         if (isoDep == null) {
             Log.e(tagName, "FAIL: IsoDep.get(tag) devolvió null - techList=${tag.techList.joinToString()}")
-            return failure(uid, "El documento no expone IsoDep.")
+            return failure(
+                uid,
+                "El documento no expone IsoDep. Puede ser un modelo sin chip sin contacto " +
+                    "(p. ej. Cartão de Cidadão portugués anterior a junio de 2024, que solo tiene interfaz de contacto)."
+            )
         }
         Log.i(tagName, "IsoDep obtenido: isConnected=${isoDep.isConnected}, timeout=${isoDep.timeout}, maxTransceiveLength=${isoDep.maxTransceiveLength}")
 
@@ -87,58 +119,65 @@ class EuropeanStructureReader(private val tag: Tag?) {
 
             try {
                 isoDep.timeout = 15000
-                Log.d(tagName, "Abriendo passportService...")
                 passportService.open()
-                Log.d(tagName, "passportService.open() OK")
 
-                Log.d(tagName, "Enviando SELECT applet (false)...")
-                passportService.sendSelectApplet(false)
-                Log.d(tagName, "SELECT applet (false) OK")
+                // ── 1. Selección del applet ICAO eMRTD (AID A0000002471001) ──
+                // La eID alemana no lo expone: en ese caso se trabaja a nivel de MF.
+                var icaoAppletAvailable = false
+                try {
+                    passportService.sendSelectApplet(false)
+                    icaoAppletAvailable = true
+                    Log.d(tagName, "SELECT applet ICAO OK")
+                } catch (e: Exception) {
+                    Log.w(tagName, "Applet ICAO no disponible (posible eID alemana): ${e.javaClass.simpleName}: ${e.message}")
+                }
 
-                Log.d(tagName, "Leyendo EF.CardAccess...")
-                val cardAccess = readCardAccess(passportService)
-                Log.d(tagName, "EF.CardAccess leído: cardAccess=${cardAccess != null}")
-
+                // ── 2. EF.CardAccess (describe los protocolos PACE/CA/TA del chip) ──
+                var cardAccess = if (icaoAppletAvailable) readCardAccess(passportService) else null
                 if (cardAccess == null) {
-                    Log.w(tagName, "EF.CardAccess es null, buscando PACEInfo imposible")
-                    return failure(uid, "El documento no ofrece PACE con CAN.")
+                    try {
+                        passportService.sendSelectMF()
+                        cardAccess = readCardAccess(passportService)
+                        if (cardAccess != null) {
+                            Log.d(tagName, "EF.CardAccess leído a nivel de MF tras seleccionar MF")
+                        }
+                    } catch (e: Exception) {
+                        Log.d(tagName, "SELECT MF no disponible: ${e.message}")
+                    }
                 }
+                Log.d(tagName, "EF.CardAccess: ${cardAccess != null}")
 
-                val paceInfo = cardAccess.securityInfos
-                    .firstNotNullOfOrNull { it as? PACEInfo }
-                Log.d(tagName, "PACEInfo encontrado: ${paceInfo != null}, totalSecurityInfos=${cardAccess.securityInfos.size}")
+                val germanEidDetected = !icaoAppletAvailable && cardAccess != null
 
-                if (paceInfo == null) {
-                    Log.w(tagName, "No se encontró PACEInfo en CardAccess. SecurityInfos: ${cardAccess.securityInfos.map { it.objectIdentifier }}")
-                    return failure(uid, "El documento no ofrece PACE con CAN.")
+                val paceInfo = cardAccess?.securityInfos
+                    ?.firstNotNullOfOrNull { it as? PACEInfo }
+                Log.d(tagName, "PACEInfo: ${paceInfo != null}, oid=${paceInfo?.objectIdentifier}, paramId=${paceInfo?.parameterId}")
+
+                // ── 3. Establecimiento del canal seguro (PACE o BAC) ──
+                val secureChannel = establishSecureChannel(passportService, credentials, paceInfo, germanEidDetected)
+                if (secureChannel.isFailure) {
+                    return failure(uid, secureChannel.errorMessage ?: "No se pudo establecer el canal seguro con el documento.")
                 }
+                Log.i(tagName, "Canal seguro establecido: ${secureChannel.method}")
 
-                Log.d(tagName, "PACEInfo: oid=${paceInfo.objectIdentifier}, paramId=${paceInfo.parameterId}")
+                if (icaoAppletAvailable) {
+                    passportService.sendSelectApplet(true)
+                }
 
                 var cardAccessData: CardAccessData? = null
                 var cardSecurityData: CardSecurityData? = null
-                cardAccessData = parseCardAccess(cardAccess)
-                Log.d(tagName, "CardAccessData: pace=${cardAccessData.paceSupported}, ca=${cardAccessData.chipAuthenticationSupported}, ta=${cardAccessData.terminalAuthenticationSupported}")
+                if (cardAccess != null) {
+                    cardAccessData = parseCardAccess(cardAccess)
+                    Log.d(tagName, "CardAccessData: pace=${cardAccessData.paceSupported}, ca=${cardAccessData.chipAuthenticationSupported}, ta=${cardAccessData.terminalAuthenticationSupported}")
+                }
 
-                Log.d(tagName, "Creando PACE key con CAN...")
-                val paceKey = PACEKeySpec.createCANKey(can)
-                Log.d(tagName, "Ejecutando doPACE...")
-                passportService.doPACE(
-                    paceKey, paceInfo.objectIdentifier,
-                    PACEInfo.toParameterSpec(paceInfo.parameterId),
-                    paceInfo.parameterId
-                )
-                Log.i(tagName, "doPACE() completado correctamente")
-
-                Log.d(tagName, "Enviando SELECT applet (true) post-PACE...")
-                passportService.sendSelectApplet(true)
-                Log.i(tagName, "PACE completado (intento $attempt/$maxRetries)")
-
-                val cardSecurity = readCardSecurity(passportService)
+                // Tras PACE/BAC con applet ICAO, EF.CardSecurity es legible con SM.
+                val cardSecurity = if (icaoAppletAvailable) readCardSecurity(passportService) else null
                 if (cardSecurity != null) {
                     cardSecurityData = parseCardSecurity(cardSecurity)
                 }
 
+                // ── 4. Barrido de Data Groups DG1-DG16 ──
                 val dgMap = mutableMapOf<Int, ByteArray?>()
                 val dgAnalysis = mutableMapOf<Int, DataGroupInfo>()
 
@@ -150,44 +189,72 @@ class EuropeanStructureReader(private val tag: Tag?) {
                     }
                 }
 
-                Log.d(tagName, "Leyendo EF.COM...")
                 val comData = readCom(passportService)
                 Log.d(tagName, "EF.COM: ${comData != null}, dgsPresent=${comData?.dataGroupsPresent}")
 
-                Log.d(tagName, "Leyendo EF.SOD...")
                 val sodData = readSod(passportService)
                 Log.d(tagName, "EF.SOD: ${sodData != null}")
 
+                // ── 5. Detección del documento ──
                 var documentDetection: DocumentDetection? = null
                 val dg1Bytes = dgMap[1]
                 if (dg1Bytes != null && dg1Bytes.isNotEmpty()) {
                     Log.d(tagName, "Detectando documento desde DG1 (${dg1Bytes.size} bytes)...")
                     documentDetection = detectDocument(dg1Bytes, cardAccessData)
                     Log.i(tagName, "Documento detectado: type=${documentDetection?.documentType}, country=${documentDetection?.countryCode}, arch=${documentDetection?.architecture}")
+                } else if (germanEidDetected) {
+                    Log.i(tagName, "Documento eID alemán detectado (sin applet ICAO, con EF.CardAccess)")
+                    documentDetection = DocumentDetection(
+                        documentType = DocumentType.GERMAN_EID.name,
+                        countryCode = "DEU",
+                        countryName = "Alemania",
+                        architecture = DocumentArchitecture.SPECIAL.name,
+                        supportedProtocols = buildList {
+                            if (cardAccessData?.paceSupported == true) add("PACE")
+                            if (cardAccessData?.chipAuthenticationSupported == true) add("CA")
+                            if (cardAccessData?.terminalAuthenticationSupported == true) add("TA")
+                        }
+                    )
                 } else {
-                    Log.w(tagName, "DG1 no disponible, no se puede detectar documento")
+                    Log.w(tagName, "DG1 no disponible, no se puede detectar el documento")
                 }
 
                 val available = dgAnalysis.filter { it.value.status == DGStatus.READ_OK }.keys.sorted()
-                val notPresent = dgAnalysis.filter { it.value.status == DGStatus.NOT_PRESENT_OR_NOT_ALLOWED }.keys.sorted()
                 val errors = dgAnalysis.filter { it.value.status == DGStatus.READ_ERROR }.keys.sorted()
-                Log.i(tagName, "Resumen DGs: OK=$available, NOT_PRESENT=$notPresent, ERRORS=$errors")
+                Log.i(tagName, "Resumen DGs: OK=$available, ERRORS=$errors, germanEid=$germanEidDetected")
 
-                val sessionStatus = when {
-                    available.isEmpty() -> NfcSessionStatus.FAILED
-                    available.containsAll(ESSENTIAL_DGS.toList()) -> NfcSessionStatus.SUCCESS
-                    else -> NfcSessionStatus.PARTIAL
-                }
-                val sessionError = when {
-                    sessionStatus == NfcSessionStatus.FAILED -> "No se pudo completar la lectura universal del documento."
-                    else -> null
+                // ── 6. Estado de la sesión ──
+                val sessionStatus: NfcSessionStatus
+                val sessionError: String?
+                when {
+                    germanEidDetected && available.isEmpty() -> {
+                        sessionStatus = NfcSessionStatus.PARTIAL
+                        sessionError = GERMAN_EID_EXPLANATION
+                    }
+                    germanEidDetected -> {
+                        sessionStatus = NfcSessionStatus.PARTIAL
+                        sessionError = "$GERMAN_EID_EXPLANATION Se leyeron ${available.size} grupo(s) de datos adicionales."
+                    }
+                    available.isEmpty() -> {
+                        sessionStatus = NfcSessionStatus.FAILED
+                        sessionError = "No se pudo leer ningún Data Group del documento con el método ${secureChannel.method}."
+                    }
+                    available.containsAll(ESSENTIAL_DGS.toList()) -> {
+                        sessionStatus = NfcSessionStatus.SUCCESS
+                        sessionError = null
+                    }
+                    else -> {
+                        sessionStatus = NfcSessionStatus.PARTIAL
+                        sessionError = "Lectura parcial: no se pudieron leer todos los grupos esenciales (DG1/DG2) con el método ${secureChannel.method}."
+                    }
                 }
 
-                Log.i(tagName, "Lectura completada. status=$sessionStatus, error=$sessionError")
+                Log.i(tagName, "Lectura completada. status=$sessionStatus, method=${secureChannel.method}")
                 Log.i(tagName, "====== readAllStructures() FIN ======")
 
                 return RawStructureData(
-                    uid = uid, can = can,
+                    uid = uid,
+                    can = credentials.can,
                     sessionStatus = sessionStatus,
                     sessionError = sessionError,
                     readerMethod = NfcReaderMethod.EUROPEAN_STRUCTURE.name,
@@ -206,17 +273,13 @@ class EuropeanStructureReader(private val tag: Tag?) {
                 Log.e(tagName, "EXCEPCIÓN en intento $attempt/$maxRetries: ${e.javaClass.simpleName}: ${e.message}", e)
 
                 if (attempt >= maxRetries || isFatalCommunicationError(e) ||
-                    e is TagLostException || e is IOException || e is CardServiceException
+                    e is TagLostException || e is IOException
                 ) {
                     val userMessage = when {
                         isFatalCommunicationError(e) ->
                             "Se perdió la conexión NFC. Mantén el documento inmóvil y reintenta."
                         e is TagLostException || e is IOException ->
-                            "No se pudo comunicar con el documento mediante PACE."
-                        e.message?.contains("6a82", ignoreCase = true) == true ->
-                            "CAN incorrecto o documento no compatible con PACE-CAN."
-                        e.message?.contains("6988", ignoreCase = true) == true ->
-                            "Error de autenticación PACE. Verifica el CAN."
+                            "No se pudo comunicar con el documento."
                         else -> "No se pudo leer el documento con el método universal. Error: ${e.message}"
                     }
                     Log.e(tagName, "Error final (tras $attempt intentos): ${e.message}", e)
@@ -238,13 +301,140 @@ class EuropeanStructureReader(private val tag: Tag?) {
         return failure(uid, userMessage)
     }
 
+    // ------------------------------------------------------------------ //
+    //  Negociación del canal seguro
+    // ------------------------------------------------------------------ //
+
+    private class SecureChannelOutcome private constructor(
+        val method: String?,
+        val errorMessage: String?
+    ) {
+        val isFailure: Boolean get() = errorMessage != null
+
+        companion object {
+            fun success(method: String) = SecureChannelOutcome(method, null)
+            fun failure(message: String) = SecureChannelOutcome(null, message)
+        }
+    }
+
+    /**
+     * Establece el canal seguro negociando PACE (CAN → MRZ → PIN) y, si el
+     * documento no ofrece PACE, BAC con la clave derivada del MRZ.
+     */
+    private fun establishSecureChannel(
+        passportService: PassportService,
+        credentials: AccessCredentials,
+        paceInfo: PACEInfo?,
+        germanEidDetected: Boolean
+    ): SecureChannelOutcome {
+        if (paceInfo == null) {
+            // Sin PACE: BAC clásico (pasaportes y documentos solo-BAC).
+            val mrz = credentials.mrz
+            if (mrz == null || !mrz.isComplete()) {
+                return SecureChannelOutcome.failure(
+                    "El documento no soporta PACE y no se han introducido los datos del MRZ. " +
+                        "Los pasaportes requieren el número de documento, la fecha de nacimiento y la fecha de caducidad."
+                )
+            }
+            return try {
+                val bacKey = BACKey(mrz.documentNumber, mrz.dateOfBirth, mrz.dateOfExpiry)
+                passportService.doBAC(bacKey)
+                Log.i(tagName, "BAC completado con MRZ (doc=${mrz.documentNumber})")
+                SecureChannelOutcome.success("BAC")
+            } catch (e: Exception) {
+                Log.e(tagName, "BAC falló: ${e.javaClass.simpleName}: ${e.message}", e)
+                SecureChannelOutcome.failure(
+                    "Los datos del documento (MRZ) no fueron aceptados. Verifica el número de documento, " +
+                        "la fecha de nacimiento y la fecha de caducidad."
+                )
+            }
+        }
+
+        // PACE disponible: cascada de contraseñas aceptadas.
+        if (credentials.hasCan()) {
+            try {
+                val paceKey = PACEKeySpec.createCANKey(credentials.can)
+                passportService.doPACE(
+                    paceKey, paceInfo.objectIdentifier,
+                    PACEInfo.toParameterSpec(paceInfo.parameterId),
+                    paceInfo.parameterId
+                )
+                Log.i(tagName, "PACE-CAN completado")
+                return SecureChannelOutcome.success("PACE-CAN")
+            } catch (e: Exception) {
+                Log.w(tagName, "PACE-CAN falló: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+
+        if (credentials.hasMrz()) {
+            try {
+                val mrz = credentials.mrz!!
+                val bacKey = BACKey(mrz.documentNumber, mrz.dateOfBirth, mrz.dateOfExpiry)
+                val paceKey = PACEKeySpec.createMRZKey(bacKey)
+                passportService.doPACE(
+                    paceKey, paceInfo.objectIdentifier,
+                    PACEInfo.toParameterSpec(paceInfo.parameterId),
+                    paceInfo.parameterId
+                )
+                Log.i(tagName, "PACE-MRZ completado")
+                return SecureChannelOutcome.success("PACE-MRZ")
+            } catch (e: Exception) {
+                Log.w(tagName, "PACE-MRZ falló: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+
+        if (credentials.hasPin()) {
+            try {
+                val paceKey = PACEKeySpec.createPINKey(credentials.pin)
+                passportService.doPACE(
+                    paceKey, paceInfo.objectIdentifier,
+                    PACEInfo.toParameterSpec(paceInfo.parameterId),
+                    paceInfo.parameterId
+                )
+                Log.i(tagName, "PACE-PIN completado")
+                return SecureChannelOutcome.success("PACE-PIN")
+            } catch (e: Exception) {
+                Log.e(tagName, "PACE-PIN falló (no se reintenta para no agotar el contador del PIN): ${e.message}")
+                return SecureChannelOutcome.failure(
+                    "El PIN no fue aceptado por el documento. No se reintenta para evitar bloquear el PIN " +
+                        "(verifícalo e inténtalo de nuevo)."
+                )
+            }
+        }
+
+        return SecureChannelOutcome.failure(accessDeniedGuidance(credentials, germanEidDetected))
+    }
+
+    private fun accessDeniedGuidance(credentials: AccessCredentials, germanEidDetected: Boolean): String {
+        if (germanEidDetected && credentials.hasCan()) {
+            return "PACE falló con el CAN en el documento eID. Verifica el CAN (6 dígitos del anverso de la carta)."
+        }
+        val hasCan = credentials.hasCan()
+        val hasMrz = credentials.hasMrz()
+        return when {
+            hasCan && !hasMrz ->
+                "El documento rechazó el CAN. Si es un pasaporte o la identidad francesa (CNIe), " +
+                    "usa el modo \"Datos del documento\" con el número de documento y las fechas del MRZ."
+            !hasCan && hasMrz ->
+                "El documento rechazó los datos del MRZ. Verifica el número de documento y las fechas. " +
+                    "Si el documento tiene CAN (DNIe/TIE español, ID Países Bajos, Cartão de Cidadão 2024+), usa el modo CAN."
+            else ->
+                "El documento rechazó todas las credenciales proporcionadas (CAN y MRZ). " +
+                    "Verifica los datos o prueba con el otro método de acceso."
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Lectura de ficheros
+    // ------------------------------------------------------------------ //
+
     private fun readCardAccess(passportService: PassportService): CardAccessFile? {
         return runCatching {
             passportService.getInputStream(PassportService.EF_CARD_ACCESS).use { input ->
                 CardAccessFile(input)
             }
         }.getOrElse {
-            Log.w(tagName, "No se pudo leer EF.CardAccess: ${it.message}")
+            Log.d(tagName, "No se pudo leer EF.CardAccess: ${it.message}")
             null
         }
     }
@@ -316,6 +506,7 @@ class EuropeanStructureReader(private val tag: Tag?) {
                 is PACEInfo -> paceAlgs.add(info.objectIdentifier)
                 is ChipAuthenticationInfo -> caSupported = true
                 is TerminalAuthenticationInfo -> taSupported = true
+                else -> {}
             }
         }
         return CardAccessData(
@@ -347,7 +538,7 @@ class EuropeanStructureReader(private val tag: Tag?) {
     private fun detectDocument(dg1Bytes: ByteArray, cardAccessData: CardAccessData?): DocumentDetection? {
         return try {
             val dg1 = DG1File(ByteArrayInputStream(dg1Bytes))
-            val mrz = dg1.mrzInfo ?: return null
+            val mrz: MRZInfo = dg1.mrzInfo ?: return null
 
             val classifier = DocumentClassifier.classify(
                 mrz.documentCode, mrz.issuingState
@@ -379,11 +570,16 @@ class EuropeanStructureReader(private val tag: Tag?) {
     }
 
     private fun readFileBytes(passportService: PassportService, fid: Short): ByteArray {
-        try {
-            return passportService.getInputStream(fid).use { it.readBytes() }
+        return try {
+            passportService.getInputStream(fid).use { it.readBytes() }
         } catch (e: Exception) {
+            // 6982 (estado de seguridad no satisfecho, p. ej. DG protegido por EAC/TA)
+            // NO se traga: se registra como ACCESS_DENIED en el análisis del DG.
+            val sw = (e as? CardServiceException)?.sw ?: -1
             val msg = e.message?.lowercase() ?: ""
-            if (msg.contains("6a82") || msg.contains("6988") || msg.contains("6a86") ||
+            if (msg.contains("6a82") || sw == 0x6A82 ||
+                msg.contains("6988") || sw == 0x6988 ||
+                msg.contains("6a86") || sw == 0x6A86 ||
                 msg.contains("not found") || msg.contains("file not found") ||
                 msg.contains("no existe") || msg.contains("not supported")
             ) {

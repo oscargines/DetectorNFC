@@ -3,8 +3,19 @@
     <string name="main_title">Lector NFC</string>
     <string name="can_hint">Código CAN (6 dígitos)</string>
     <string name="invalid_can">Introduce un CAN válido de 6 dígitos</string>
+    <string name="access_mode_title">MÉTODO DE ACCESO AL CHIP</string>
+    <string name="mode_can">CAN (DNIe/TIE español, ID Países Bajos, Portugal 2024+)</string>
+    <string name="mode_mrz">Datos del documento (pasaportes, ID francesa)</string>
+    <string name="can_help">Número de 6 dígitos impreso en el documento: DNIe/TIE español (zona inferior), ID holandesa (anverso), Cartão de Cidadão 2024+ (anverso).</string>
+    <string name="doc_number_hint">Número de documento</string>
+    <string name="dob_hint">Fecha de nacimiento</string>
+    <string name="expiry_hint">Fecha de caducidad</string>
+    <string name="date_hint">dd/mm/aaaa</string>
+    <string name="mrz_help">Datos de la zona MRZ del documento: número de documento (sin dígito de control), fecha de nacimiento y fecha de caducidad. Se usan para BAC/PACE en pasaportes y en la CNIe francesa.</string>
+    <string name="invalid_mrz">Introduce el número de documento, la fecha de nacimiento y la fecha de caducidad</string>
+    <string name="no_access_credentials">Introduce el CAN del documento o sus datos del MRZ (número, fecha de nacimiento y caducidad) para iniciar la lectura.</string>
     <string name="btn_scan">Continuar al escaneo</string>
-    <string name="info_after_scan">Introduce el CAN y acerca después el documento al teléfono para iniciar la lectura NFC.</string>
+    <string name="info_after_scan">Selecciona el método de acceso al chip, introduce las credenciales y acerca el documento al teléfono para iniciar la lectura NFC.</string>
     <string name="scan_title">Escaneo NFC</string>
     <string name="scan_instructions">Mantén el documento inmóvil sobre la zona NFC del teléfono hasta completar la lectura.</string>
     <string name="results_title">Resumen del documento</string>
@@ -55,6 +66,11 @@
     <string name="photo_jp2_decode_failed">Imagen JP2 detectada en el chip, pero OpenJPEG no pudo decodificarla (datos truncados o variante no soportada). Puede guardarse con el botón inferior.</string>
     <string name="signature_jp2_decode_failed">Firma JP2 detectada en el chip, pero OpenJPEG no pudo decodificarla (datos truncados o variante no soportada).</string>
     <string name="no_dg_data">No hay datos de DG disponibles para mostrar.</string>
-    <string name="german_eid_warning">Documento alemán eID detectado. Este documento utiliza un estándar especial y algunos datos pueden no estar disponibles con el flujo ICAO actual.</string>
+    <string name="german_eid_warning">Documento eID alemán (Personalausweis) detectado. Se ha establecido el canal seguro PACE con el CAN y se ha volcado la estructura del chip (EF.CardAccess), pero los datos personales de la eID alemana solo son legibles tras una Terminal Authentication (EAC v2) con certificados de terminal autorizados por el BSI alemán, reservados a terminales oficiales (p. ej. control de fronteras). Ninguna aplicación de terceros puede leerlos.</string>
     <string name="generic_result_error">No se pudieron renderizar los resultados estructurados. Se mostrará el JSON bruto.</string>
+    <string name="generate_report">Generar informe</string>
+    <string name="share_report">Compartir informe</string>
+    <string name="report_saved">Informe guardado en Documentos/DetectorNFC</string>
+    <string name="report_shared_only">Informe generado y preparado para compartir</string>
+    <string name="error_generating_report">Error al generar el informe</string>
 </resources>

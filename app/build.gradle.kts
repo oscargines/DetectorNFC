@@ -1,5 +1,17 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
+}
+
+// ── Firma de release ─────────────────────────────────────────────
+// Las credenciales viven en keystore.properties (raíz del repo, NO commiteada).
+// Si el fichero no existe, el build de release se genera sin firmar.
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) {
+        keystorePropsFile.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -10,8 +22,8 @@ android {
         applicationId         = "com.oscar.detectornfc"
         minSdk                = 31
         targetSdk             = 36
-        versionCode           = 1
-        versionName           = "1.0"
+        versionCode           = 2
+        versionName           = "1.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
@@ -26,6 +38,17 @@ android {
         }
     }
 
+    signingConfigs {
+        if (keystorePropsFile.exists()) {
+            create("release") {
+                storeFile     = file(keystoreProps.getProperty("storeFile", "release.keystore"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias      = keystoreProps.getProperty("keyAlias", "detectornfc")
+                keyPassword   = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -33,6 +56,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (keystorePropsFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

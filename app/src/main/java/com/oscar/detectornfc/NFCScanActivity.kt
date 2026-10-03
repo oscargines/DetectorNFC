@@ -31,9 +31,13 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         private const val TAG = "NFCScanActivity"
         const val EXTRA_CAN = "CAN"
         const val EXTRA_JSON_PATH = "JSON_PATH"
+        const val EXTRA_MRZ_DOC_NUMBER = "MRZ_DOC_NUMBER"
+        const val EXTRA_MRZ_DATE_OF_BIRTH = "MRZ_DATE_OF_BIRTH"
+        const val EXTRA_MRZ_DATE_OF_EXPIRY = "MRZ_DATE_OF_EXPIRY"
     }
 
     private var can: String = ""
+    private var credentials: AccessCredentials = AccessCredentials()
     private var nfcAdapter: NfcAdapter? = null
     private var isReading = false
     private var retryDialog: AlertDialog? = null
@@ -42,9 +46,10 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_nfc_scan)
 
-        can = intent.getStringExtra(EXTRA_CAN) ?: ""
+        credentials = buildCredentials(intent)
+        can = credentials.can ?: ""
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
-        Log.i(TAG, "onCreate() - canLength=${can.length}, canMasked=${maskSecret(can)}, nfcSupported=${nfcAdapter != null}, nfcEnabled=${nfcAdapter?.isEnabled == true}")
+        Log.i(TAG, "onCreate() - methods=${credentials.describe()}, canLength=${can.length}, canMasked=${maskSecret(can)}, nfcSupported=${nfcAdapter != null}, nfcEnabled=${nfcAdapter?.isEnabled == true}")
 
         if (nfcAdapter == null) {
             Log.e(TAG, "Dispositivo sin NFC; cerrando pantalla de escaneo")
@@ -104,15 +109,15 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 var structResult: RawStructureData? = null
                 var dniResult: DniData? = null
 
-                if (can.isNotBlank()) {
-                    Log.d(TAG, "Leyendo documento con CAN enmascarado=${maskSecret(can)}")
-                    structResult = readDocumentStructure(tag, can)
+                if (credentials.hasAnyAccessMethod()) {
+                    Log.d(TAG, "Leyendo documento con método=${credentials.describe()}, CAN enmascarado=${maskSecret(can)}")
+                    structResult = readDocumentStructure(tag, credentials)
                 } else {
-                    Log.w(TAG, "CAN vacío: no se puede leer sin código de acceso")
+                    Log.w(TAG, "Sin credenciales de acceso (CAN ni MRZ): no se puede leer el documento")
                     structResult = RawStructureData(
                         uid = null, can = null,
                         sessionStatus = NfcSessionStatus.FAILED,
-                        sessionError = "CAN vacío. No se puede iniciar la lectura NFC.",
+                        sessionError = "No se han introducido credenciales de acceso (CAN o datos del MRZ).",
                         readerMethod = NfcReaderMethod.EUROPEAN_STRUCTURE.name
                     )
                 }
@@ -187,10 +192,10 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                         e is java.io.IOException ->
                             "Se perdió la conexión NFC durante la lectura. Mantén el documento inmóvil y reintenta."
                         e is SecurityException ->
-                            "Error de seguridad en la comunicación con el chip. Verifica que el CAN sea correcto."
+                            "Error de seguridad en la comunicación con el chip. Verifica el CAN o los datos del MRZ."
                         e.message?.contains("6a82", ignoreCase = true) == true ||
                         e.message?.contains("6988", ignoreCase = true) == true ->
-                            "El documento rechazó el código de acceso. Verifica que el CAN sea correcto (6 dígitos en la parte inferior del documento)."
+                            "El documento rechazó el código de acceso. Verifica el CAN (6 dígitos en la parte inferior del documento) o los datos del MRZ (número de documento, fecha de nacimiento y caducidad)."
                         else -> "Error inesperado: ${e.message}. Inténtalo de nuevo."
                     }
                     isReading = false
@@ -242,22 +247,23 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         retryDialog = null
     }
 
-    private fun readDocumentStructure(tag: Tag, can: String): RawStructureData {
+    private fun readDocumentStructure(tag: Tag, credentials: AccessCredentials): RawStructureData {
         Log.i(TAG, "====== readDocumentStructure() INICIO ======")
 
         // Si dniedroid está disponible, intentar primero el método español (DNIe).
         // Esto evita el ciclo en el que EuropeanStructureReader falla con 6982
         // antes de poder detectar el tipo de documento.
+        // El método español requiere CAN: con solo MRZ (pasaportes) se omite.
         Log.i(TAG, "Paso 1: Verificando dependencias dniedroid...")
         val depsAvailable = DniReader.areDependenciesAvailable()
         Log.i(TAG, "Dependencias dniedroid disponibles: $depsAvailable")
 
-        if (depsAvailable) {
+        if (depsAvailable && credentials.hasCan()) {
             Log.i(TAG, "Paso 2: Intentando DniReader (método español)")
             updateStatus("Iniciando lectura DNIe…")
 
             val dniReader = DniReader(tag)
-            val dniResult = dniReader.readDniSync(can)
+            val dniResult = dniReader.readDniSync(credentials.can ?: "")
             Log.i(TAG, "Resultado DniReader: status=${dniResult.sessionStatus}, error=${dniResult.sessionError}, fallbackSuggested=${dniResult.fallbackSuggested}")
 
             if (dniResult.sessionStatus != NfcSessionStatus.FAILED) {
@@ -278,13 +284,15 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 ?: "El método DNIe no funcionó. Se intentará un método alternativo."
             Log.w(TAG, "DniReader sugiere fallback: $fallbackMessage")
             notifyFallbackStart(fallbackMessage)
+        } else if (!credentials.hasCan()) {
+            Log.i(TAG, "Sin CAN: método español (DNIe) omitido; se usa el método universal con ${credentials.describe()}")
         } else {
             Log.w(TAG, "Dependencias dniedroid no disponibles")
         }
 
         Log.i(TAG, "Paso 3: Intentando EuropeanStructureReader (método universal)")
         val reader = EuropeanStructureReader(tag)
-        val structResult = reader.readAllStructures(can)
+        val structResult = reader.readAllStructures(credentials)
         Log.i(TAG, "Resultado EuropeanStructureReader: status=${structResult.sessionStatus}, error=${structResult.sessionError}, uid=${structResult.uid}")
 
         if (structResult.sessionStatus != NfcSessionStatus.FAILED) {
@@ -294,17 +302,17 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
 
         Log.w(TAG, "Paso 4: EuropeanStructureReader falló. Intentando ICAO fallback...")
-        val result = tryIcaoFallback(tag, can, "Documento leído con método ICAO estándar.")
+        val result = tryIcaoFallback(tag, credentials, "Documento leído con método ICAO estándar.")
         Log.i(TAG, "====== readDocumentStructure() FIN (ICAO fallback) ======")
         return result
     }
 
-    private fun tryIcaoFallback(tag: Tag, can: String, message: String): RawStructureData {
+    private fun tryIcaoFallback(tag: Tag, credentials: AccessCredentials, message: String): RawStructureData {
         Log.i(TAG, "====== tryIcaoFallback() INICIO ======")
         Log.i(TAG, "Mensaje: $message")
         updateStatus(message)
         val icaoReader = IcaoReader(tag)
-        val icaoResult = icaoReader.readWithCan(can)
+        val icaoResult = icaoReader.readWithCredentials(credentials)
         Log.i(TAG, "Resultado IcaoReader: status=${icaoResult.sessionStatus}, error=${icaoResult.sessionError}, dgs=${icaoResult.dataGroups.keys}")
         val parser = NfcDataParser()
         val result = parser.convertFromRawNfcData(icaoResult)
@@ -312,19 +320,30 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         return result
     }
 
-    private fun readDocumentWithFallback(tag: Tag, can: String): RawNfcData {
-        val primaryResult = DniReader(tag).readDniSync(can)
-        if (!primaryResult.fallbackSuggested) {
-            return primaryResult
-        }
+    private fun readDocumentWithFallback(tag: Tag, credentials: AccessCredentials): RawNfcData {
+        if (credentials.hasCan()) {
+            val primaryResult = DniReader(tag).readDniSync(credentials.can ?: "")
+            if (!primaryResult.fallbackSuggested) {
+                return primaryResult
+            }
 
-        val fallbackMessage = primaryResult.fallbackReason
-            ?: "Se intentará un método ICAO alternativo para este documento."
-        Log.i(TAG, "Activando fallback ICAO: $fallbackMessage")
-        notifyFallbackStart(fallbackMessage)
-        updateStatus("Iniciando procedimiento ICAO alternativo…")
-        return IcaoReader(tag).readWithCan(can)
+            val fallbackMessage = primaryResult.fallbackReason
+                ?: "Se intentará un método ICAO alternativo para este documento."
+            Log.i(TAG, "Activando fallback ICAO: $fallbackMessage")
+            notifyFallbackStart(fallbackMessage)
+            updateStatus("Iniciando procedimiento ICAO alternativo…")
+        }
+        return IcaoReader(tag).readWithCredentials(credentials)
     }
+
+    /** Construye las credenciales (CAN y/o MRZ) a partir de los extras del Intent. */
+    private fun buildCredentials(intent: Intent): AccessCredentials =
+        AccessCredentials.fromValues(
+            can = intent.getStringExtra(EXTRA_CAN),
+            documentNumber = intent.getStringExtra(EXTRA_MRZ_DOC_NUMBER),
+            dateOfBirth = intent.getStringExtra(EXTRA_MRZ_DATE_OF_BIRTH),
+            dateOfExpiry = intent.getStringExtra(EXTRA_MRZ_DATE_OF_EXPIRY)
+        )
 
     private fun notifyFallbackStart(message: String) {
         val latch = CountDownLatch(1)

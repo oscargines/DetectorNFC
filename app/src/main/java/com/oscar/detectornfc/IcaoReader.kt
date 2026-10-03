@@ -6,6 +6,7 @@ import android.nfc.tech.IsoDep
 import android.util.Log
 import net.sf.scuba.smartcards.CardServiceException
 import net.sf.scuba.smartcards.IsoDepCardService
+import org.jmrtd.BACKey
 import org.jmrtd.PACEKeySpec
 import org.jmrtd.PassportService
 import org.jmrtd.lds.CardAccessFile
@@ -21,20 +22,28 @@ class IcaoReader(private val tag: Tag?) {
     private val accessMethodDetail = "PACE-CAN / ICAO JMRTD"
     private val maxRetries = 2
 
-    fun readWithCan(can: String): RawNfcData {
-        Log.i(tagName, "====== readWithCan() INICIO ======")
-        Log.i(tagName, "tag=${tag != null}, can.length=${can.length}, can.isBlank=${can.isBlank()}")
+    /** Compatibilidad: lectura con solo CAN (PACE-CAN). */
+    fun readWithCan(can: String): RawNfcData = readWithCredentials(AccessCredentials.withCan(can))
+
+    fun readWithCredentials(credentials: AccessCredentials): RawNfcData {
+        Log.i(tagName, "====== readWithCredentials() INICIO ======")
+        Log.i(tagName, "tag=${tag != null}, methods=${credentials.describe()}")
 
         if (tag == null) {
             Log.e(tagName, "FAIL: Tag NFC nulo para lectura ICAO")
             return failure(null, "No se detecto un tag NFC valido.")
         }
-        if (can.isBlank()) {
-            Log.e(tagName, "FAIL: CAN vacío")
-            return failure(formatUid(tag.id), "CAN vacío. No se puede iniciar la lectura ICAO con PACE.")
+        if (!credentials.hasAnyAccessMethod()) {
+            Log.e(tagName, "FAIL: sin credenciales de acceso (CAN/MRZ)")
+            return failure(
+                formatUid(tag.id),
+                "No se han introducido credenciales de acceso. Usa el CAN del documento o los datos del MRZ (número, fecha de nacimiento y caducidad).",
+                detailFor(credentials)
+            )
         }
 
         val uid = formatUid(tag.id)
+        val baseDetail = detailFor(credentials)
         Log.i(tagName, "uid=$uid, techs=${tag.techList.joinToString()}")
 
         var lastError: Exception? = null
@@ -78,33 +87,31 @@ class IcaoReader(private val tag: Tag?) {
                 val cardAccess = readCardAccess(passportService)
                 Log.d(tagName, "EF.CardAccess: ${cardAccess != null}")
 
-                if (cardAccess == null) {
-                    Log.w(tagName, "EF.CardAccess es null")
-                    return failure(uid, "El documento no ofrece PACE con CAN para el método ICAO.")
-                }
-
-                val paceInfo = cardAccess.securityInfos
-                    .firstNotNullOfOrNull { it as? PACEInfo }
+                val paceInfo = cardAccess?.securityInfos
+                    ?.firstNotNullOfOrNull { it as? PACEInfo }
                 Log.d(tagName, "PACEInfo: ${paceInfo != null}, oid=${paceInfo?.objectIdentifier}, paramId=${paceInfo?.parameterId}")
 
-                if (paceInfo == null) {
-                    Log.w(tagName, "No se encontró PACEInfo. SecurityInfos: ${cardAccess.securityInfos.map { it.objectIdentifier }}")
-                    return failure(uid, "El documento no ofrece PACE con CAN para el método ICAO.")
+                // ── Canal seguro: PACE (CAN → MRZ → PIN) o BAC con MRZ ──
+                val channelMethod = when {
+                    paceInfo != null -> establishPace(passportService, credentials, paceInfo)
+                    credentials.hasMrz() -> establishBac(passportService, credentials)
+                    else -> null
                 }
+                if (channelMethod == null) {
+                    val guidance = if (paceInfo == null && !credentials.hasMrz()) {
+                        "El documento no soporta PACE y no se han introducido los datos del MRZ. " +
+                            "Los pasaportes requieren el número de documento, la fecha de nacimiento y la fecha de caducidad."
+                    } else {
+                        accessDeniedGuidance(credentials)
+                    }
+                    Log.w(tagName, "No se pudo establecer el canal seguro ICAO: $guidance")
+                    return failure(uid, guidance, baseDetail)
+                }
+                val accessDetail = "$channelMethod / ICAO JMRTD"
 
-                Log.d(tagName, "Ejecutando doPACE...")
-                val paceKey = PACEKeySpec.createCANKey(can)
-                passportService.doPACE(
-                    paceKey,
-                    paceInfo.objectIdentifier,
-                    PACEInfo.toParameterSpec(paceInfo.parameterId),
-                    paceInfo.parameterId
-                )
-                Log.d(tagName, "doPACE() OK")
-
-                Log.d(tagName, "Enviando SELECT applet (true) post-PACE...")
+                Log.d(tagName, "Enviando SELECT applet (true) tras $channelMethod...")
                 passportService.sendSelectApplet(true)
-                Log.i(tagName, "PACE ICAO completado correctamente (intento $attempt/$maxRetries)")
+                Log.i(tagName, "$channelMethod ICAO completado correctamente (intento $attempt/$maxRetries)")
 
                 val dgMap = mutableMapOf<Int, ByteArray?>()
                 val dgAnalysis = mutableMapOf<Int, DataGroupInfo>()
@@ -170,18 +177,18 @@ class IcaoReader(private val tag: Tag?) {
                     else -> null
                 }
                 Log.i(tagName, "Lectura ICAO completada. status=$sessionStatus, error=$sessionError")
-                Log.i(tagName, "====== readWithCan() FIN ======")
+                Log.i(tagName, "====== readWithCredentials() FIN ======")
 
                 return RawNfcData(
                     uid = uid,
-                    can = can,
+                    can = credentials.can,
                     dataGroups = dgMap,
                     sod = null,
                     dgAnalysis = dgAnalysis,
                     sessionStatus = sessionStatus,
                     sessionError = sessionError,
                     readerMethod = NfcReaderMethod.ICAO_JMRTD,
-                    accessMethodDetail = accessMethodDetail,
+                    accessMethodDetail = accessDetail,
                     fallbackUsed = true
                 )
             } catch (e: Exception) {
@@ -200,7 +207,7 @@ class IcaoReader(private val tag: Tag?) {
                         else -> "No se pudo leer el documento con el método ICAO alternativo."
                     }
                     Log.e(tagName, "Error final en lectura ICAO (tras $attempt intentos): ${e.message}", e)
-                    return failure(uid, userMessage)
+                    return failure(uid, userMessage, baseDetail)
                 }
                 Thread.sleep(500)
             }
@@ -211,7 +218,117 @@ class IcaoReader(private val tag: Tag?) {
                 "No se pudo completar la comunicación con el documento mediante ICAO."
             else -> "No se pudo leer el documento con el método ICAO alternativo tras varios intentos."
         }
-        return failure(uid, userMessage)
+        return failure(uid, userMessage, baseDetail)
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Negociación del canal seguro (PACE con CAN/MRZ/PIN o BAC con MRZ)
+    // ------------------------------------------------------------------ //
+
+    /** Cascada PACE: primero CAN, después MRZ y, por último, PIN. Devuelve el método usado. */
+    private fun establishPace(
+        passportService: PassportService,
+        credentials: AccessCredentials,
+        paceInfo: PACEInfo
+    ): String? {
+        if (credentials.hasCan()) {
+            try {
+                val paceKey = PACEKeySpec.createCANKey(credentials.can)
+                passportService.doPACE(
+                    paceKey,
+                    paceInfo.objectIdentifier,
+                    PACEInfo.toParameterSpec(paceInfo.parameterId),
+                    paceInfo.parameterId
+                )
+                Log.i(tagName, "PACE-CAN completado")
+                return "PACE-CAN"
+            } catch (e: Exception) {
+                Log.w(tagName, "PACE-CAN falló: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+
+        if (credentials.hasMrz()) {
+            try {
+                val mrz = credentials.mrz!!
+                val paceKey = PACEKeySpec.createMRZKey(
+                    BACKey(mrz.documentNumber, mrz.dateOfBirth, mrz.dateOfExpiry)
+                )
+                passportService.doPACE(
+                    paceKey,
+                    paceInfo.objectIdentifier,
+                    PACEInfo.toParameterSpec(paceInfo.parameterId),
+                    paceInfo.parameterId
+                )
+                Log.i(tagName, "PACE-MRZ completado")
+                return "PACE-MRZ"
+            } catch (e: Exception) {
+                Log.w(tagName, "PACE-MRZ falló: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+
+        if (credentials.hasPin()) {
+            try {
+                val paceKey = PACEKeySpec.createPINKey(credentials.pin)
+                passportService.doPACE(
+                    paceKey,
+                    paceInfo.objectIdentifier,
+                    PACEInfo.toParameterSpec(paceInfo.parameterId),
+                    paceInfo.parameterId
+                )
+                Log.i(tagName, "PACE-PIN completado")
+                return "PACE-PIN"
+            } catch (e: Exception) {
+                Log.e(tagName, "PACE-PIN falló (no se reintenta para no agotar el contador del PIN): ${e.message}")
+                return null
+            }
+        }
+
+        return null
+    }
+
+    /** BAC clásico con la clave derivada del MRZ (pasaportes sin PACE). */
+    private fun establishBac(
+        passportService: PassportService,
+        credentials: AccessCredentials
+    ): String? {
+        val mrz = credentials.mrz
+        if (mrz == null || !mrz.isComplete()) return null
+        return try {
+            val bacKey = BACKey(mrz.documentNumber, mrz.dateOfBirth, mrz.dateOfExpiry)
+            passportService.doBAC(bacKey)
+            Log.i(tagName, "BAC completado con MRZ (doc=${mrz.documentNumber})")
+            "BAC"
+        } catch (e: Exception) {
+            Log.e(tagName, "BAC falló: ${e.javaClass.simpleName}: ${e.message}", e)
+            null
+        }
+    }
+
+    private fun accessDeniedGuidance(credentials: AccessCredentials): String {
+        val hasCan = credentials.hasCan()
+        val hasMrz = credentials.hasMrz()
+        return when {
+            hasCan && !hasMrz ->
+                "El documento rechazó el CAN. Si es un pasaporte o la identidad francesa (CNIe), " +
+                    "usa el modo \"Datos del documento\" con el número de documento y las fechas del MRZ."
+            !hasCan && hasMrz ->
+                "El documento rechazó los datos del MRZ. Verifica el número de documento y las fechas. " +
+                    "Si el documento tiene CAN (DNIe/TIE español, ID Países Bajos, Cartão de Cidadão 2024+), usa el modo CAN."
+            else ->
+                "El documento rechazó todas las credenciales proporcionadas (CAN y MRZ). " +
+                    "Verifica los datos o prueba con el otro método de acceso."
+        }
+    }
+
+    /** Descripción del método de acceso disponible, p. ej. "PACE-MRZ/BAC / ICAO JMRTD". */
+    private fun detailFor(credentials: AccessCredentials): String {
+        val methods = buildList {
+            if (credentials.hasCan()) add("PACE-CAN")
+            if (credentials.hasMrz()) add("PACE-MRZ/BAC")
+            if (credentials.hasPin()) add("PACE-PIN")
+        }
+        val joined = methods.joinToString(" + ").ifBlank { "sin credenciales" }
+        return "$joined / ICAO JMRTD"
     }
 
     private fun readCardAccess(passportService: PassportService): CardAccessFile? {
@@ -294,7 +411,7 @@ class IcaoReader(private val tag: Tag?) {
         }
     }
 
-    private fun failure(uid: String?, message: String): RawNfcData {
+    private fun failure(uid: String?, message: String, detail: String = accessMethodDetail): RawNfcData {
         return RawNfcData(
             uid = uid,
             can = null,
@@ -303,7 +420,7 @@ class IcaoReader(private val tag: Tag?) {
             sessionStatus = NfcSessionStatus.FAILED,
             sessionError = message,
             readerMethod = NfcReaderMethod.ICAO_JMRTD,
-            accessMethodDetail = accessMethodDetail,
+            accessMethodDetail = detail,
             fallbackUsed = true
         )
     }
