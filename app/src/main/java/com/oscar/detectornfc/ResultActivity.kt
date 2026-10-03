@@ -19,6 +19,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.oscar.detectornfc.report.ReportData
 import com.oscar.detectornfc.report.ReportPdfGenerator
 import com.oscar.detectornfc.report.maskCAN
@@ -50,6 +52,22 @@ class ResultActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_result)
+
+        val root = findViewById<View>(R.id.result_root)
+        val initialLeft = root.paddingLeft
+        val initialTop = root.paddingTop
+        val initialRight = root.paddingRight
+        val initialBottom = root.paddingBottom
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(
+                initialLeft + systemBars.left,
+                initialTop + systemBars.top,
+                initialRight + systemBars.right,
+                initialBottom + systemBars.bottom
+            )
+            insets
+        }
 
         val btnShare = findViewById<Button>(R.id.btn_share)
         val btnBack = findViewById<Button>(R.id.btn_back)
@@ -654,17 +672,17 @@ class ResultActivity : AppCompatActivity() {
             try {
                 val outFile = File(cacheDir, fileName)
                 ReportPdfGenerator(applicationContext).generate(report, outFile)
-                val saved = saveReportToDocuments(outFile) != null
-                Log.i(TAG, "Informe generado: ${outFile.absolutePath} (guardado=$saved)")
+                val savedUri = saveReportToDocuments(outFile)
+                Log.i(TAG, "Informe generado: ${outFile.absolutePath} (guardado=${savedUri != null})")
                 runOnUiThread {
                     btnReport.isEnabled = true
                     btnReport.alpha = 1f
                     Toast.makeText(
                         this,
-                        getString(if (saved) R.string.report_saved else R.string.report_shared_only),
+                        getString(if (savedUri != null) R.string.report_saved else R.string.report_shared_only),
                         Toast.LENGTH_LONG
                     ).show()
-                    sharePdf(outFile)
+                    openPdf(outFile, savedUri)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error generando informe PDF: ${e.message}", e)
@@ -729,6 +747,25 @@ class ResultActivity : AppCompatActivity() {
             Log.e(TAG, "Error guardando informe en Documents: ${e.message}", e)
             null
         }
+    }
+
+    private fun openPdf(file: File, savedUri: Uri?) {
+        val cacheUri = runCatching {
+            FileProvider.getUriForFile(this, "${applicationContext.packageName}.fileprovider", file)
+        }.getOrNull()
+        for (uri in listOfNotNull(savedUri, cacheUri)) {
+            try {
+                val view = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/pdf")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(view)
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "No se pudo abrir $uri con el visor por defecto: ${e.message}")
+            }
+        }
+        sharePdf(file)
     }
 
     private fun sharePdf(file: File) {

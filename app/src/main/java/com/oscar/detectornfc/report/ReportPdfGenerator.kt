@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -85,6 +87,11 @@ private class Renderer(
     private val contentBottom = pageH - footerReserve
 
     private val pBitmap = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    // Imágenes del chip en blanco y negro (elimina el tinte azulado del JP2)
+    private val pBitmapGray = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+        colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+    }
 
     private val pRed = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.RED
@@ -264,7 +271,7 @@ private class Renderer(
     // ── Cabecera ─────────────────────────────────────────────
 
     private fun drawHeader() {
-        val shieldH = cm(3f)
+        val shieldH = cm(2.4f)
         val top = cm(2f)
 
         val wEs = shieldWidth(shieldSpain, shieldH)
@@ -282,17 +289,17 @@ private class Renderer(
             )
         }
 
-        val boxW = cm(9f)
-        val boxH = cm(2.5f)
+        val boxW = cm(7.2f)
+        val boxH = cm(2f)
         val boxL = (pageW - boxW) / 2f
         val boxT = top + (shieldH - boxH) / 2f
 
         canvas.drawRect(boxL, boxT, boxL + boxW, boxT + boxH, pRed)
         canvas.drawRect(boxL + 3.5f, boxT + 3.5f, boxL + boxW - 3.5f, boxT + boxH - 3.5f, pRed)
 
-        pConfidential.textSize = 18f
-        while (pConfidential.textSize > 6f &&
-            pConfidential.measureText(CONFIDENTIAL_TEXT) > boxW - 18f
+        pConfidential.textSize = 14f
+        while (pConfidential.textSize > 5f &&
+            pConfidential.measureText(CONFIDENTIAL_TEXT) > boxW - 16f
         ) {
             pConfidential.textSize -= 0.5f
         }
@@ -374,7 +381,7 @@ private class Renderer(
             val dh = usable.height * scale
             val dl = areaL + ((areaR - areaL) - dw) / 2f
             val dt = areaT + ((areaB - areaT) - dh) / 2f
-            canvas.drawBitmap(usable, null, RectF(dl, dt, dl + dw, dt + dh), pBitmap)
+            canvas.drawBitmap(usable, null, RectF(dl, dt, dl + dw, dt + dh), pBitmapGray)
             canvas.drawRect(dl, dt, dl + dw, dt + dh, pImageBorder)
         } else {
             fitText(pPlaceholder, placeholder, areaR - areaL, 9f, 6f)

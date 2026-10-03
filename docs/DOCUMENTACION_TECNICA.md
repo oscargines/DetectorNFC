@@ -184,23 +184,25 @@ btn_generate_report (activity_result.xml, deshabilitado hasta parsear el JSON)
         ReportData(identity, uid, can, timestamp, dgs, photo, signature, sha256(json))
         hilo en background → ReportPdfGenerator(applicationContext).generate(report, file)
    → copia en MediaStore: Documents/DetectorNFC/informe_<DOC>_<fecha>.pdf
-   → ACTION_SEND (application/pdf) vía FileProvider (cache-path)
+   → se abre automáticamente con el visor PDF por defecto del teléfono (ACTION_VIEW);
+     si no hay visor, fallback a ACTION_SEND (application/pdf) vía FileProvider
 ```
 
 Tecnología: `android.graphics.pdf.PdfDocument` + `Canvas` — **sin dependencias
 externas**. El generador hace **dos pasadas**: la primera cuenta páginas
 (`pageCount`) y la segunda dibuja con el total conocido para el pie
-`Página X de Y`.
+`Página X de Y`. Las imágenes del chip (foto/firma) se dibujan en **escala de
+grises** para eliminar el tinte azulado del JP2; los escudos conservan color.
 
 ### 8.2 Especificación de layout (A4 = 595,28 × 841,89 pt · 1 cm = 28,3465 pt)
 
 | Elemento | Posición / tamaño |
 |---|---|
-| Escudo España | x = **1 cm**, y = **2 cm**, alto **3 cm** (ratio conservado) |
-| Escudo Guardia Civil | y = 2 cm, margen derecho **1 cm**, alto **3 cm** |
-| Recuadro central | **9 × 2,5 cm**, centrado en X, alineado verticalmente con los escudos |
+| Escudo España | x = **1 cm**, y = **2 cm**, alto **2,4 cm** (ratio conservado) |
+| Escudo Guardia Civil | y = 2 cm, margen derecho **1 cm**, alto **2,4 cm** |
+| Recuadro central | **7,2 × 2 cm**, centrado en X, centrado verticalmente con los escudos |
 | Doble borde del recuadro | 2 rectángulos concéntricos (inset 3,5 pt), `strokeWidth = 1 pt`, rojo |
-| Texto interior | `C O N F I D E N C I A L`, centrado, rojo, auto-ajuste 18 → 6 pt |
+| Texto interior | `C O N F I D E N C I A L`, centrado, rojo, auto-ajuste 14 → 5 pt |
 | Bajo el recuadro | `SÓLO USO INTERNO, PROHIBIDO DIFUSIÓN` — **6 pt, rojo** |
 | Título | `INFORME DATOS INTERNOS DOCUMENTO: <ID>` — serif bold, auto-ajuste 13 → 7,5 pt |
 | Subtítulo | `Análisis forense de datos · Lectura de chip NFC · Generado el <fecha>` — 7,5 pt gris |
