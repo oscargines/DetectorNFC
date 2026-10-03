@@ -1,6 +1,7 @@
 <resources>
     <string name="app_name">DetectorNFC</string>
     <string name="main_title">Lector NFC</string>
+    <string name="version_giat">Versión GIAT</string>
     <string name="can_hint">Código CAN (6 dígitos)</string>
     <string name="invalid_can">Introduce un CAN válido de 6 dígitos</string>
     <string name="access_mode_title">MÉTODO DE ACCESO AL CHIP</string>
