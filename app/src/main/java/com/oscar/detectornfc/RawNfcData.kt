@@ -29,7 +29,8 @@ data class RawNfcData(
 enum class NfcReaderMethod {
     SPANISH_DNIE,
     ICAO_JMRTD,
-    EUROPEAN_STRUCTURE
+    EUROPEAN_STRUCTURE,
+    ICAO_PASSPORT
 }
 
 enum class NfcSessionStatus {

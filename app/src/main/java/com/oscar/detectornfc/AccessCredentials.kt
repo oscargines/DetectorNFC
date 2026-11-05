@@ -93,10 +93,17 @@ data class MrzCredentials(
             MrzCredentials.isValidMrzDate(dateOfBirth) &&
             MrzCredentials.isValidMrzDate(dateOfExpiry)
 
+    /** Nº documento normalizado para claves BAC/PACE-MRZ (mayúsculas, sin espacios; relleno '<' final eliminado). */
+    fun normalizedDocumentNumber(): String = normalizeDocumentNumber(documentNumber)
+
     override fun toString(): String =
         "MrzCredentials(documentNumber=$documentNumber, dateOfBirth=$dateOfBirth, dateOfExpiry=***)"
 
     companion object {
+        /** Normaliza el nº de documento MRZ para derivación BAC/PACE: mayúsculas, sin espacios, sin relleno '<' final. */
+        fun normalizeDocumentNumber(value: String): String =
+            value.trim().uppercase().replace(" ", "").trimEnd('<')
+
         /** Valida una fecha MRZ: 6 dígitos con mes 01-12 y día 01-31. */
         fun isValidMrzDate(value: String): Boolean {
             if (value.length != 6 || !value.all { it.isDigit() }) return false
@@ -109,6 +116,7 @@ data class MrzCredentials(
          * Convierte fechas de entrada comunes al formato MRZ yymmdd:
          *  - "dd/mm/yyyy" o "dd-mm-yyyy" (UI de la aplicación)
          *  - "ddMMyyyy" (sin separadores)
+         *  - "yymmdd" (ya en formato MRZ, se devuelve tal cual)
          */
         fun toMrzDate(raw: String): String? {
             val trimmed = raw.trim()
@@ -120,14 +128,14 @@ data class MrzCredentials(
                 val month = parts[1].padStart(2, '0')
                 val year = parts[2]
                 if (year.length != 4 || !year.all { it.isDigit() }) return null
-                return "$year${month}$day".takeIf { isValidMrzDate(it) }
+                return "${year.takeLast(2)}$month$day".takeIf { isValidMrzDate(it) }
             }
 
             if (trimmed.length == 8 && trimmed.all { it.isDigit() }) {
                 val day = trimmed.substring(0, 2)
                 val month = trimmed.substring(2, 4)
                 val year = trimmed.substring(4, 8)
-                return "$year$month$day".takeIf { isValidMrzDate(it) }
+                return "${year.takeLast(2)}$month$day".takeIf { isValidMrzDate(it) }
             }
 
             if (trimmed.length == 6 && trimmed.all { it.isDigit() }) {

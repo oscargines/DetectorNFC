@@ -95,7 +95,8 @@ class NfcDataParser {
         }
 
         return when (rawData.readerMethod) {
-            NfcReaderMethod.ICAO_JMRTD -> parseIcaoRawData(rawData)
+            NfcReaderMethod.ICAO_JMRTD,
+            NfcReaderMethod.ICAO_PASSPORT -> parseIcaoRawData(rawData)
             NfcReaderMethod.SPANISH_DNIE -> parseSpanishRawData(rawData)
             NfcReaderMethod.EUROPEAN_STRUCTURE -> parseEuropeanRawData(rawData)
         }

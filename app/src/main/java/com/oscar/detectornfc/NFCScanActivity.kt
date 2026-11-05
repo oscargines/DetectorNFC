@@ -6,12 +6,20 @@ import android.nfc.Tag
 import android.os.Bundle
 import android.util.Log
 import android.view.View
+import android.app.DatePickerDialog
+import android.text.Editable
+import android.text.TextWatcher
+import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.google.gson.Gson
+import com.oscar.detectornfc.nfc.NfcAttemptLogger
+import com.oscar.detectornfc.passport.PassportIcaoReader
 import java.io.File
+import java.util.Calendar
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -34,10 +42,14 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         const val EXTRA_MRZ_DOC_NUMBER = "MRZ_DOC_NUMBER"
         const val EXTRA_MRZ_DATE_OF_BIRTH = "MRZ_DATE_OF_BIRTH"
         const val EXTRA_MRZ_DATE_OF_EXPIRY = "MRZ_DATE_OF_EXPIRY"
+        const val EXTRA_SCAN_MODE = "SCAN_MODE"
+        const val MODE_DNI = "DNI"
+        const val MODE_PASSPORT = "PASSPORT"
     }
 
     private var can: String = ""
     private var credentials: AccessCredentials = AccessCredentials()
+    private var scanMode: String = MODE_DNI
     private var nfcAdapter: NfcAdapter? = null
     private var isReading = false
     private var retryDialog: AlertDialog? = null
@@ -48,8 +60,9 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
         credentials = buildCredentials(intent)
         can = credentials.can ?: ""
+        scanMode = resolveScanMode(intent)
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
-        Log.i(TAG, "onCreate() - methods=${credentials.describe()}, canLength=${can.length}, canMasked=${maskSecret(can)}, nfcSupported=${nfcAdapter != null}, nfcEnabled=${nfcAdapter?.isEnabled == true}")
+        Log.i(TAG, "onCreate() - mode=$scanMode, methods=${credentials.describe()}, canLength=${can.length}, canMasked=${maskSecret(can)}, nfcSupported=${nfcAdapter != null}, nfcEnabled=${nfcAdapter?.isEnabled == true}")
 
         if (nfcAdapter == null) {
             Log.e(TAG, "Dispositivo sin NFC; cerrando pantalla de escaneo")
@@ -110,8 +123,8 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 var dniResult: DniData? = null
 
                 if (credentials.hasAnyAccessMethod()) {
-                    Log.d(TAG, "Leyendo documento con método=${credentials.describe()}, CAN enmascarado=${maskSecret(can)}")
-                    structResult = readDocumentStructure(tag, credentials)
+                    Log.d(TAG, "Leyendo documento con modo=$scanMode, método=${credentials.describe()}, CAN enmascarado=${maskSecret(can)}")
+                    structResult = readDocumentStructure(tag, credentials, scanMode)
                 } else {
                     Log.w(TAG, "Sin credenciales de acceso (CAN ni MRZ): no se puede leer el documento")
                     structResult = RawStructureData(
@@ -121,6 +134,8 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                         readerMethod = NfcReaderMethod.EUROPEAN_STRUCTURE.name
                     )
                 }
+
+                NfcAttemptLogger.logAttempt(applicationContext, scanMode, credentials, structResult)
 
                 if (structResult.sessionStatus == NfcSessionStatus.FAILED) {
                     val failureMessage = structResult.sessionError
@@ -182,6 +197,7 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
             } catch (e: Throwable) {
                 Log.e(TAG, "Error en lectura NFC: ${e.message}", e)
+                NfcAttemptLogger.logAttempt(applicationContext, scanMode, credentials, null, error = e)
                 runOnUiThread {
                     val userMessage = when {
                         e is NoClassDefFoundError || e is LinkageError -> {
@@ -219,27 +235,6 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     /**
      * Muestra un diálogo cuando falla la lectura, permitiendo reintentar o volver.
      */
-    private fun showRetryDialog(failureMessage: String) {
-        if (isFinishing || isDestroyed) return
-        retryDialog?.dismiss()
-        
-        updateStatus("Error en la lectura")
-        
-        retryDialog = AlertDialog.Builder(this)
-            .setTitle("Error en la lectura del documento")
-            .setMessage(failureMessage)
-            .setCancelable(false)
-            .setPositiveButton("Reintentar") { _, _ ->
-                Log.d(TAG, "Usuario elige reintentar la lectura")
-                updateStatus("Acerca el documento al teléfono…")
-                isReading = false
-            }
-            .setNegativeButton("Volver") { _, _ ->
-                Log.d(TAG, "Usuario elige volver a MainActivity")
-                finish()
-            }
-            .show()
-    }
 
     override fun onDestroy() {
         super.onDestroy()
@@ -247,9 +242,23 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         retryDialog = null
     }
 
-    private fun readDocumentStructure(tag: Tag, credentials: AccessCredentials): RawStructureData {
-        Log.i(TAG, "====== readDocumentStructure() INICIO ======")
+    private fun readDocumentStructure(tag: Tag, credentials: AccessCredentials, scanMode: String): RawStructureData {
+        Log.i(TAG, "====== readDocumentStructure() INICIO ====== mode=$scanMode")
 
+        // Ruta Pasaporte (ICAO 9303): aislada del flujo DNI español. Nunca invoca DniReader.
+        if (scanMode == MODE_PASSPORT) {
+            Log.i(TAG, "Modo PASAPORTE: usando PassportIcaoReader (MRZ/BAC/PACE-MRZ)")
+            updateStatus("Leyendo pasaporte (ICAO 9303)…")
+            val passportResult = PassportIcaoReader(tag).read(credentials)
+            Log.i(TAG, "Resultado PassportIcaoReader: status=${passportResult.sessionStatus}, method=${passportResult.readerMethod}, error=${passportResult.sessionError}")
+            if (passportResult.sessionStatus != NfcSessionStatus.FAILED) {
+                return passportResult
+            }
+            Log.w(TAG, "PassportIcaoReader falló. Intentando fallback ICAO genérico (dominio pasaporte)…")
+            return tryIcaoFallback(tag, credentials, "Reintentando lectura ICAO del pasaporte…")
+        }
+
+        // --- Flujo DNI/actual (sin cambios funcionales): puede usar DniReader (dniedroid) ---
         // Si dniedroid está disponible, intentar primero el método español (DNIe).
         // Esto evita el ciclo en el que EuropeanStructureReader falla con 6982
         // antes de poder detectar el tipo de documento.
@@ -305,6 +314,116 @@ class NFCScanActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         val result = tryIcaoFallback(tag, credentials, "Documento leído con método ICAO estándar.")
         Log.i(TAG, "====== readDocumentStructure() FIN (ICAO fallback) ======")
         return result
+    }
+
+    /** (C) Auto-ruteo: modo explícito o inferencia (MRZ-only o pasaporte). Nunca fuerza DniReader desde modo pasaporte. */
+    private fun resolveScanMode(intent: Intent): String {
+        val explicit = intent.getStringExtra(EXTRA_SCAN_MODE)
+        if (explicit == MODE_PASSPORT || explicit == MODE_DNI) return explicit
+        // Auto-ruteo: credenciales solo MRZ sugieren pasaporte/ICAO
+        if (credentials.hasMrz() && !credentials.hasCan()) return MODE_PASSPORT
+        return MODE_DNI
+    }
+
+    private fun showRetryDialog(failureMessage: String) {
+        if (isFinishing || isDestroyed) return
+        retryDialog?.dismiss()
+        updateStatus("Error en la lectura")
+        if (scanMode == MODE_PASSPORT && !credentials.hasMrz()) {
+            showPassportCanRetryDialog(failureMessage)
+            return
+        }
+        retryDialog = AlertDialog.Builder(this)
+            .setTitle("Error en la lectura del documento")
+            .setMessage(failureMessage)
+            .setCancelable(false)
+            .setPositiveButton("Reintentar") { _, _ ->
+                Log.d(TAG, "Usuario elige reintentar la lectura")
+                updateStatus("Acerca el documento al teléfono…")
+                isReading = false
+            }
+            .setNegativeButton("Volver") { _, _ -> finish() }
+            .show()
+    }
+
+    /** Pasaporte + intento CAN sin resultado: reintentar CAN o pasar a MRZ pidiendo datos. */
+    private fun showPassportCanRetryDialog(failureMessage: String) {
+        val message = getString(R.string.passport_can_failed_msg) + "\n\n" + failureMessage
+        retryDialog = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.passport_can_failed_title))
+            .setMessage(message)
+            .setCancelable(false)
+            .setPositiveButton(getString(R.string.btn_retry)) { _, _ ->
+                updateStatus("Acerca el pasaporte al teléfono…")
+                isReading = false
+            }
+            .setNeutralButton(getString(R.string.passport_scan_mrz)) { _, _ ->
+                showPassportMrzDialog()
+            }
+            .setNegativeButton(getString(R.string.btn_cancel)) { _, _ -> finish() }
+            .show()
+    }
+
+    private fun showPassportMrzDialog() {
+        val density = resources.displayMetrics.density
+        val pad = (16 * density).toInt()
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        val etDoc = EditText(this).apply { hint = getString(R.string.doc_number_hint); isSingleLine = true }
+        val etDob = EditText(this).apply { hint = getString(R.string.dob_hint); isFocusable = false; isClickable = true }
+        val etExp = EditText(this).apply { hint = getString(R.string.expiry_hint); isFocusable = false; isClickable = true }
+        container.addView(etDoc)
+        container.addView(etDob)
+        container.addView(etExp)
+        var dobMrz: String? = null
+        var expMrz: String? = null
+        fun pick(target: EditText, onPick: (String, String) -> Unit) {
+            target.setOnClickListener {
+                val c = Calendar.getInstance()
+                DatePickerDialog(this, { _, y, m, d ->
+                    val mm = (m + 1).toString().padStart(2, '0')
+                    val dd = d.toString().padStart(2, '0')
+                    val yy = (y % 100).toString().padStart(2, '0')
+                    onPick("$yy$mm$dd", "$dd/$mm/$y")
+                }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show()
+            }
+        }
+        pick(etDob) { mrz, disp -> dobMrz = mrz; etDob.setText(disp); etDob.error = null }
+        pick(etExp) { mrz, disp -> expMrz = mrz; etExp.setText(disp); etExp.error = null }
+        etDoc.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { etDoc.error = null }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.passport_mrz_dialog_title))
+            .setView(container)
+            .setCancelable(false)
+            .setPositiveButton(getString(R.string.passport_mrz_start_scan), null)
+            .setNegativeButton(getString(R.string.btn_cancel)) { _, _ -> finish() }
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val doc = etDoc.text.toString().trim().uppercase()
+                if (doc.isBlank() || dobMrz == null || expMrz == null) {
+                    if (doc.isBlank()) etDoc.error = getString(R.string.invalid_mrz)
+                    if (dobMrz == null) etDob.error = getString(R.string.invalid_mrz)
+                    if (expMrz == null) etExp.error = getString(R.string.invalid_mrz)
+                    return@setOnClickListener
+                }
+                credentials = AccessCredentials.fromValues(can, doc, dobMrz, expMrz)
+                scanMode = MODE_PASSPORT
+                Log.i(TAG, "Pasaporte: cambiando a escaneo MRZ (doc enmascarado) y reintentando NFC")
+                dialog.dismiss()
+                updateStatus("Acerca el pasaporte al teléfono…")
+                isReading = false
+            }
+        }
+        retryDialog = dialog
+        dialog.show()
     }
 
     private fun tryIcaoFallback(tag: Tag, credentials: AccessCredentials, message: String): RawStructureData {

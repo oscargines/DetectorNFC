@@ -6,15 +6,22 @@
     <string name="invalid_can">Introduce un CAN válido de 6 dígitos</string>
     <string name="access_mode_title">MÉTODO DE ACCESO AL CHIP</string>
     <string name="mode_can">CAN (DNIe/TIE español, ID Países Bajos, Portugal 2024+)</string>
-    <string name="mode_mrz">Datos del documento (pasaportes, ID francesa)</string>
-    <string name="can_help">Número de 6 dígitos impreso en el documento: DNIe/TIE español (zona inferior), ID holandesa (anverso), Cartão de Cidadão 2024+ (anverso).</string>
+    <string name="mode_mrz">Datos del documento / MRZ (ID europea, CNIe francesa)</string>
+    <string name="mode_passport">Pasaporte (ICAO 9303, MRZ/BAC o PACE)</string>
+    <string name="can_help">N&#250;mero de 6 d&#237;gitos impreso en el documento: DNIe/TIE espa&#241;ol, ID holandesa, Cart&#227;o de Cidad&#227;o 2024+. Algunos pasaportes tambi&#233;n llevan CAN; en la mayor&#237;a se accede con MRZ (BAC/PACE-MRZ).</string>
+    <string name="can_optional_passport">Introduce el CAN del pasaporte (6 d&#237;gitos) para el primer intento NFC. Si no se obtiene resultado, podr&#225;s escanear con MRZ.</string>
+    <string name="passport_can_failed_title">No se pudo leer con CAN</string>
+    <string name="passport_can_failed_msg">No se obtuvo resultado usando el CAN. Puedes volver a intentarlo con CAN o escanear con los datos del MRZ (n&#250;mero de documento, fecha de nacimiento y caducidad).</string>
+    <string name="passport_scan_mrz">Escanear con MRZ</string>
+    <string name="passport_mrz_dialog_title">Datos MRZ del pasaporte</string>
+    <string name="passport_mrz_start_scan">Iniciar escaneo NFC</string>
     <string name="doc_number_hint">Número de documento</string>
     <string name="dob_hint">Fecha de nacimiento</string>
     <string name="expiry_hint">Fecha de caducidad</string>
     <string name="date_hint">dd/mm/aaaa</string>
-    <string name="mrz_help">Datos de la zona MRZ del documento: número de documento (sin dígito de control), fecha de nacimiento y fecha de caducidad. Se usan para BAC/PACE en pasaportes y en la CNIe francesa.</string>
+    <string name="mrz_help">Datos de la zona MRZ del documento: número de documento (sin dígito de control), fecha de nacimiento y fecha de caducidad. Se usan para BAC/PACE en pasaportes y en la CNIe francesa. En modo Pasaporte, el MRZ es obligatorio; el CAN es opcional y no suele funcionar en pasaportes.</string>
     <string name="invalid_mrz">Introduce el número de documento, la fecha de nacimiento y la fecha de caducidad</string>
-    <string name="no_access_credentials">Introduce el CAN del documento o sus datos del MRZ (número, fecha de nacimiento y caducidad) para iniciar la lectura.</string>
+    <string name="no_access_credentials">Introduce el CAN del documento o sus datos del MRZ (número, fecha de nacimiento y caducidad) para iniciar la lectura. Para pasaportes, usa el modo Pasaporte con MRZ.</string>
     <string name="btn_scan">Continuar al escaneo</string>
     <string name="info_after_scan">Selecciona el método de acceso al chip, introduce las credenciales y acerca el documento al teléfono para iniciar la lectura NFC.</string>
     <string name="scan_title">Escaneo NFC</string>
@@ -74,4 +81,17 @@
     <string name="report_saved">Informe guardado en Documentos/DetectorNFC</string>
     <string name="report_shared_only">Informe generado y preparado para compartir</string>
     <string name="error_generating_report">Error al generar el informe</string>
+
+    <!-- Escaneo por cámara (OCR de CAN/MRZ) -->
+    <string name="scan_can_camera">Escanear CAN con cámara</string>
+    <string name="scan_mrz_camera">Escanear MRZ con cámara</string>
+    <string name="camera_scan_can_help">Alinea el número CAN (6 dígitos) dentro del marco. Se rellenará automáticamente.</string>
+    <string name="camera_scan_mrz_help">Alinea las líneas MRZ del documento dentro del marco. Se rellenarán número y fechas automáticamente.</string>
+    <string name="camera_scan_frame_help">Ajusta para capturar el documento completo</string>
+    <string name="camera_scan_detected">Dato reconocido</string>
+    <string name="camera_torch_on">Linterna</string>
+    <string name="camera_torch_off">Apagar linterna</string>
+    <string name="camera_permission_denied">Se necesita el permiso de cámara para escanear el documento</string>
 </resources>
+
+

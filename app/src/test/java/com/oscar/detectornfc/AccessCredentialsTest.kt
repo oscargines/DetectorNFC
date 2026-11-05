@@ -87,4 +87,25 @@ class AccessCredentialsTest {
         assertEquals("123456", creds.can)
         assertTrue(creds.hasCan())
     }
+
+    @Test
+    fun `toMrzDate convierte fecha dd MM yyyy a yymmdd`() {
+        assertEquals("261003", MrzCredentials.toMrzDate("03/10/2026"))
+    }
+
+    @Test
+    fun `toMrzDate convierte fecha ddMMyyyy a yymmdd`() {
+        assertEquals("261003", MrzCredentials.toMrzDate("03102026"))
+    }
+
+    @Test
+    fun `toMrzDate deja tal cual un yymmdd valido`() {
+        assertEquals("850412", MrzCredentials.toMrzDate("850412"))
+    }
+
+    @Test
+    fun `toMrzDate de fecha invalida devuelve null`() {
+        assertNull(MrzCredentials.toMrzDate("99/99/2026"))
+        assertNull(MrzCredentials.toMrzDate(""))
+    }
 }
